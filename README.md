@@ -1,6 +1,82 @@
 # CodeGraph
 
-A local-first code intelligence system that builds a semantic knowledge graph from any codebase. CodeGraph provides structural understanding of code relationships—not just text similarity—enabling AI assistants to understand how code connects, what depends on what, and what breaks when something changes.
+A local-first code intelligence system that builds a semantic knowledge graph from any codebase. Designed to give Claude Code deep understanding of code relationships.
+
+## Quick Start
+
+### 1. Install
+
+```bash
+npm install -g @colbymchenry/codegraph
+```
+
+### 2. Configure Claude Code MCP
+
+Add to your `~/.claude.json` in the `mcpServers` section:
+
+```json
+{
+  "mcpServers": {
+    "codegraph": {
+      "type": "stdio",
+      "command": "codegraph",
+      "args": ["serve", "--mcp"]
+    }
+  }
+}
+```
+
+### 3. Add Global Instructions
+
+Create or append to `~/.claude/CLAUDE.md`:
+
+```markdown
+## CodeGraph
+
+CodeGraph builds a semantic knowledge graph of codebases for better code exploration.
+
+### If `.codegraph/` exists in the project
+
+Use the codegraph MCP tools instead of manually searching:
+
+- `codegraph_search` - Find symbols by name
+- `codegraph_context` - Get context for a task/issue
+- `codegraph_callers` - Find what calls a function
+- `codegraph_callees` - Find what a function calls
+- `codegraph_impact` - See what's affected by changing a symbol
+- `codegraph_node` - Get details about a specific symbol
+- `codegraph_status` - Check index status
+
+Use these tools when:
+- Exploring unfamiliar code
+- Finding where a function is used
+- Understanding dependencies before making changes
+- Building context for bug fixes or features
+
+The index auto-updates via git post-commit hook, so no manual sync needed.
+
+### If `.codegraph/` does NOT exist
+
+At the start of a session, ask the user if they'd like to initialize CodeGraph for better code intelligence:
+
+"I notice this project doesn't have CodeGraph initialized. Would you like me to run `codegraph init -i` to build a code knowledge graph? This enables smarter code exploration, caller/callee analysis, and impact detection."
+
+If they agree, run:
+codegraph init -i
+```
+
+### 4. Initialize Your Projects
+
+```bash
+cd your-project
+codegraph init -i    # Initialize and index
+```
+
+### 5. Restart Claude Code
+
+Restart Claude Code for the MCP server to load. The tools will be available in any project with a `.codegraph/` directory.
+
+---
 
 ## Features
 
@@ -12,43 +88,21 @@ A local-first code intelligence system that builds a semantic knowledge graph fr
 - **Git integration** — automatic sync via post-commit hooks
 - **MCP Server** — integrate directly with Claude Code and other AI assistants
 
-## Installation
-
-```bash
-# Clone and install
-git clone <repository-url>
-cd codegraph
-npm install
-
-# Build
-npm run build
-
-# Link globally (optional, for CLI usage)
-npm link
-```
-
-### Requirements
+## Requirements
 
 - Node.js >= 18.0.0
-- npm or yarn
 
-## Quick Start
+## CLI Usage
 
 ```bash
-# Initialize CodeGraph in your project
-codegraph init /path/to/your/project
-
-# Index the codebase (with progress)
-codegraph index /path/to/your/project
-
-# Search for symbols
-codegraph query "UserService"
-
-# Build context for a task
-codegraph context "fix the login bug"
-
-# Check index status
-codegraph status
+codegraph init [path]       # Initialize in a project
+codegraph index [path]      # Full index
+codegraph sync [path]       # Incremental update
+codegraph status [path]     # Show statistics
+codegraph query <search>    # Search symbols
+codegraph context <task>    # Build context for AI
+codegraph hooks install     # Install git auto-sync hook
+codegraph serve --mcp       # Start MCP server
 ```
 
 ## CLI Commands
@@ -139,70 +193,12 @@ codegraph serve --mcp                    # Start MCP server (stdio)
 codegraph serve --mcp --path /project    # Specify project path
 ```
 
-## Using with Claude Code (MCP)
-
-CodeGraph can be used as an MCP (Model Context Protocol) server, allowing Claude Code to directly query your codebase.
-
-### Setup
-
-1. Initialize and index your project:
-   ```bash
-   codegraph init /path/to/your/project --index
-   ```
-
-2. Add to your Claude Code MCP configuration (`~/.claude/claude_desktop_config.json` or similar):
-   ```json
-   {
-     "mcpServers": {
-       "codegraph": {
-         "command": "codegraph",
-         "args": ["serve", "--mcp", "--path", "/path/to/your/project"]
-       }
-     }
-   }
-   ```
-
-   Or if using npx:
-   ```json
-   {
-     "mcpServers": {
-       "codegraph": {
-         "command": "npx",
-         "args": ["codegraph", "serve", "--mcp", "--path", "/path/to/your/project"]
-       }
-     }
-   }
-   ```
-
-3. Restart Claude Code. The following tools will be available:
-
-### MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `codegraph_search` | Search for code symbols by name or semantic similarity |
-| `codegraph_context` | Build relevant code context for a task or issue |
-| `codegraph_callers` | Find all functions/methods that call a specific symbol |
-| `codegraph_callees` | Find all functions/methods that a symbol calls |
-| `codegraph_impact` | Analyze what code could be affected by changing a symbol |
-| `codegraph_node` | Get detailed information about a specific symbol |
-| `codegraph_status` | Get index statistics |
-
-### Example Prompts for Claude Code
-
-Once configured, you can ask Claude Code things like:
-
-- "Use codegraph to find all callers of the `authenticate` function"
-- "What would be impacted if I change the `UserService` class?"
-- "Build context for fixing the checkout bug"
-- "Search for all functions related to payment processing"
-
 ## Library Usage
 
 CodeGraph can also be used as a library in your Node.js applications:
 
 ```typescript
-import CodeGraph from 'codegraph';
+import CodeGraph from '@colbymchenry/codegraph';
 
 // Initialize a new project
 const cg = await CodeGraph.init('/path/to/project');
