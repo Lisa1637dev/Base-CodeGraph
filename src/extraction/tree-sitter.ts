@@ -743,10 +743,19 @@ export class TreeSitterExtractor {
     if (!this.extractor) return;
 
     const nodeType = node.type;
+    let skipChildren = false;
 
     // Check for function declarations
+    // For Python/Ruby, function_definition inside a class should be treated as method
     if (this.extractor.functionTypes.includes(nodeType)) {
-      this.extractFunction(node);
+      if (this.nodeStack.length > 0 && this.extractor.methodTypes.includes(nodeType)) {
+        // Inside a class - treat as method
+        this.extractMethod(node);
+        skipChildren = true; // extractMethod visits children via visitFunctionBody
+      } else {
+        this.extractFunction(node);
+        skipChildren = true; // extractFunction visits children via visitFunctionBody
+      }
     }
     // Check for class declarations
     else if (this.extractor.classTypes.includes(nodeType)) {
@@ -759,22 +768,27 @@ export class TreeSitterExtractor {
       } else {
         this.extractClass(node);
       }
+      skipChildren = true; // extractClass visits body children
     }
-    // Check for method declarations
+    // Check for method declarations (only if not already handled by functionTypes)
     else if (this.extractor.methodTypes.includes(nodeType)) {
       this.extractMethod(node);
+      skipChildren = true; // extractMethod visits children via visitFunctionBody
     }
     // Check for interface/protocol/trait declarations
     else if (this.extractor.interfaceTypes.includes(nodeType)) {
       this.extractInterface(node);
+      skipChildren = true; // extractInterface visits body children
     }
     // Check for struct declarations
     else if (this.extractor.structTypes.includes(nodeType)) {
       this.extractStruct(node);
+      skipChildren = true; // extractStruct visits body children
     }
     // Check for enum declarations
     else if (this.extractor.enumTypes.includes(nodeType)) {
       this.extractEnum(node);
+      skipChildren = true; // extractEnum visits body children
     }
     // Check for imports
     else if (this.extractor.importTypes.includes(nodeType)) {
@@ -785,11 +799,13 @@ export class TreeSitterExtractor {
       this.extractCall(node);
     }
 
-    // Visit children
-    for (let i = 0; i < node.namedChildCount; i++) {
-      const child = node.namedChild(i);
-      if (child) {
-        this.visitNode(child);
+    // Visit children (unless the extract method already visited them)
+    if (!skipChildren) {
+      for (let i = 0; i < node.namedChildCount; i++) {
+        const child = node.namedChild(i);
+        if (child) {
+          this.visitNode(child);
+        }
       }
     }
   }

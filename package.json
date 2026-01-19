@@ -1,12 +1,15 @@
 {
   "name": "@colbymchenry/codegraph",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A local-first code intelligence system that builds a semantic knowledge graph from any codebase",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
     "codegraph": "./dist/bin/codegraph.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc && npm run copy-assets",
     "copy-assets": "cp -r src/extraction/queries dist/extraction/ && cp src/db/schema.sql dist/db/",
@@ -14,6 +17,8 @@
     "cli": "npm run build && node dist/bin/codegraph.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:eval": "vitest run __tests__/evaluation/",
+    "eval": "npm run build && npx tsx __tests__/evaluation/runner.ts",
     "clean": "rm -rf dist"
   },
   "keywords": [

@@ -390,10 +390,45 @@ export class QueryBuilder {
   }
 
   /**
-   * Search nodes by name using FTS
+   * Search nodes by name using FTS with fallback to LIKE for better matching
+   *
+   * Search strategy:
+   * 1. Try FTS5 prefix match (query*) for word-start matching
+   * 2. If no results, try LIKE for substring matching (e.g., "signIn" finds "signInWithGoogle")
+   * 3. Score results based on match quality
    */
   searchNodes(query: string, options: SearchOptions = {}): SearchResult[] {
     const { kinds, languages, limit = 100, offset = 0 } = options;
+
+    // First try FTS5 with prefix matching
+    let results = this.searchNodesFTS(query, { kinds, languages, limit, offset });
+
+    // If no FTS results, try LIKE-based substring search
+    if (results.length === 0 && query.length >= 2) {
+      results = this.searchNodesLike(query, { kinds, languages, limit, offset });
+    }
+
+    return results;
+  }
+
+  /**
+   * FTS5 search with prefix matching
+   */
+  private searchNodesFTS(query: string, options: SearchOptions): SearchResult[] {
+    const { kinds, languages, limit = 100, offset = 0 } = options;
+
+    // Add prefix wildcard for better matching (e.g., "auth" matches "AuthService", "authenticate")
+    // Escape special FTS5 characters and add prefix wildcard
+    const ftsQuery = query
+      .replace(/['"*()]/g, '') // Remove special chars
+      .split(/\s+/)
+      .filter(term => term.length > 0)
+      .map(term => `"${term}"*`) // Prefix match each term
+      .join(' OR ');
+
+    if (!ftsQuery) {
+      return [];
+    }
 
     let sql = `
       SELECT nodes.*, bm25(nodes_fts) as score
@@ -402,7 +437,7 @@ export class QueryBuilder {
       WHERE nodes_fts MATCH ?
     `;
 
-    const params: (string | number)[] = [query];
+    const params: (string | number)[] = [ftsQuery];
 
     if (kinds && kinds.length > 0) {
       sql += ` AND nodes.kind IN (${kinds.map(() => '?').join(',')})`;
@@ -417,11 +452,75 @@ export class QueryBuilder {
     sql += ' ORDER BY score LIMIT ? OFFSET ?';
     params.push(limit, offset);
 
+    try {
+      const rows = this.db.prepare(sql).all(...params) as (NodeRow & { score: number })[];
+      return rows.map((row) => ({
+        node: rowToNode(row),
+        score: Math.abs(row.score), // bm25 returns negative scores
+      }));
+    } catch {
+      // FTS query failed, return empty
+      return [];
+    }
+  }
+
+  /**
+   * LIKE-based substring search for cases where FTS doesn't match
+   * Useful for camelCase matching (e.g., "signIn" finds "signInWithGoogle")
+   */
+  private searchNodesLike(query: string, options: SearchOptions): SearchResult[] {
+    const { kinds, languages, limit = 100, offset = 0 } = options;
+
+    let sql = `
+      SELECT nodes.*,
+        CASE
+          WHEN name = ? THEN 1.0
+          WHEN name LIKE ? THEN 0.9
+          WHEN name LIKE ? THEN 0.8
+          WHEN qualified_name LIKE ? THEN 0.7
+          ELSE 0.5
+        END as score
+      FROM nodes
+      WHERE (
+        name LIKE ? OR
+        qualified_name LIKE ? OR
+        name LIKE ?
+      )
+    `;
+
+    // Pattern variants for better matching
+    const exactMatch = query;
+    const startsWith = `${query}%`;
+    const contains = `%${query}%`;
+
+    const params: (string | number)[] = [
+      exactMatch,     // Exact match score
+      startsWith,     // Starts with score
+      contains,       // Contains score
+      contains,       // Qualified name score
+      contains,       // WHERE: name contains
+      contains,       // WHERE: qualified_name contains
+      startsWith,     // WHERE: name starts with
+    ];
+
+    if (kinds && kinds.length > 0) {
+      sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
+      params.push(...kinds);
+    }
+
+    if (languages && languages.length > 0) {
+      sql += ` AND language IN (${languages.map(() => '?').join(',')})`;
+      params.push(...languages);
+    }
+
+    sql += ' ORDER BY score DESC, length(name) ASC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+
     const rows = this.db.prepare(sql).all(...params) as (NodeRow & { score: number })[];
 
     return rows.map((row) => ({
       node: rowToNode(row),
-      score: Math.abs(row.score), // bm25 returns negative scores
+      score: row.score,
     }));
   }
 

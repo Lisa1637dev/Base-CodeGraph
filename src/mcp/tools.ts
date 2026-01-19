@@ -40,17 +40,20 @@ export interface ToolResult {
 
 /**
  * All CodeGraph MCP tools
+ *
+ * Designed for minimal context usage - use codegraph_context as the primary tool,
+ * and only use other tools for targeted follow-up queries.
  */
 export const tools: ToolDefinition[] = [
   {
     name: 'codegraph_search',
-    description: 'Search for code symbols (functions, classes, methods) by name or semantic similarity. Returns matching nodes with their locations and signatures.',
+    description: 'Quick symbol search by name. Returns locations only (no code). Use codegraph_context instead for comprehensive task context.',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'Search query - can be a symbol name or natural language description',
+          description: 'Symbol name or partial name (e.g., "auth", "signIn", "UserService")',
         },
         kind: {
           type: 'string',
@@ -59,7 +62,7 @@ export const tools: ToolDefinition[] = [
         },
         limit: {
           type: 'number',
-          description: 'Maximum number of results to return (default: 10)',
+          description: 'Maximum results (default: 10)',
           default: 10,
         },
       },
@@ -68,7 +71,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'codegraph_context',
-    description: 'Build relevant code context for a task or issue. Finds related symbols and their code, formatted for understanding the codebase.',
+    description: 'PRIMARY TOOL: Build comprehensive context for a task. Returns entry points, related symbols, and key code - often enough to understand the codebase without additional tool calls.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -78,12 +81,12 @@ export const tools: ToolDefinition[] = [
         },
         maxNodes: {
           type: 'number',
-          description: 'Maximum number of code symbols to include (default: 20)',
+          description: 'Maximum symbols to include (default: 20)',
           default: 20,
         },
         includeCode: {
           type: 'boolean',
-          description: 'Include full code snippets (default: true)',
+          description: 'Include code snippets for key symbols (default: true)',
           default: true,
         },
       },
@@ -149,7 +152,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'codegraph_node',
-    description: 'Get detailed information about a specific code symbol, including its full code.',
+    description: 'Get detailed information about a specific code symbol. Use includeCode=true only when you need the full source code - otherwise just get location and signature to minimize context usage.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -159,8 +162,8 @@ export const tools: ToolDefinition[] = [
         },
         includeCode: {
           type: 'boolean',
-          description: 'Include full source code (default: true)',
-          default: true,
+          description: 'Include full source code (default: false to minimize context)',
+          default: false,
         },
       },
       required: ['symbol'],
@@ -331,7 +334,8 @@ export class ToolHandler {
    */
   private async handleNode(args: Record<string, unknown>): Promise<ToolResult> {
     const symbol = args.symbol as string;
-    const includeCode = args.includeCode !== false;
+    // Default to false to minimize context usage
+    const includeCode = args.includeCode === true;
 
     // Find the node by name
     const results = this.cg.searchNodes(symbol, { limit: 1 });
@@ -384,19 +388,19 @@ export class ToolHandler {
   }
 
   // =========================================================================
-  // Formatting helpers
+  // Formatting helpers (compact by default to reduce context usage)
   // =========================================================================
 
   private formatSearchResults(results: SearchResult[]): string {
     const lines: string[] = [`## Search Results (${results.length} found)`, ''];
 
     for (const result of results) {
-      const { node, score } = result;
+      const { node } = result;
       const location = node.startLine ? `:${node.startLine}` : '';
+      // Compact format: one line per result with key info
       lines.push(`### ${node.name} (${node.kind})`);
-      lines.push(`**Location:** ${node.filePath}${location}`);
-      lines.push(`**Score:** ${Math.round(score * 100)}%`);
-      if (node.signature) lines.push(`**Signature:** ${node.signature}`);
+      lines.push(`${node.filePath}${location}`);
+      if (node.signature) lines.push(`\`${node.signature}\``);
       lines.push('');
     }
 
@@ -408,7 +412,8 @@ export class ToolHandler {
 
     for (const node of nodes) {
       const location = node.startLine ? `:${node.startLine}` : '';
-      lines.push(`- **${node.name}** (${node.kind}) - ${node.filePath}${location}`);
+      // Compact: just name, kind, location
+      lines.push(`- ${node.name} (${node.kind}) - ${node.filePath}${location}`);
     }
 
     return lines.join('\n');
@@ -416,15 +421,10 @@ export class ToolHandler {
 
   private formatImpact(symbol: string, impact: Subgraph): string {
     const nodeCount = impact.nodes.size;
-    const edgeCount = impact.edges.length;
 
+    // Compact format: just list affected symbols grouped by file
     const lines: string[] = [
-      `## Impact Analysis for "${symbol}"`,
-      '',
-      `**Nodes affected:** ${nodeCount}`,
-      `**Relationships:** ${edgeCount}`,
-      '',
-      '### Affected Symbols:',
+      `## Impact: "${symbol}" affects ${nodeCount} symbols`,
       '',
     ];
 
@@ -438,10 +438,9 @@ export class ToolHandler {
 
     for (const [file, nodes] of byFile) {
       lines.push(`**${file}:**`);
-      for (const node of nodes) {
-        const location = node.startLine ? `:${node.startLine}` : '';
-        lines.push(`  - ${node.name} (${node.kind})${location}`);
-      }
+      // Compact: inline list
+      const nodeList = nodes.map(n => `${n.name}:${n.startLine}`).join(', ');
+      lines.push(nodeList);
       lines.push('');
     }
 
@@ -454,19 +453,19 @@ export class ToolHandler {
       `## ${node.name} (${node.kind})`,
       '',
       `**Location:** ${node.filePath}${location}`,
-      `**Language:** ${node.language}`,
     ];
 
     if (node.signature) {
-      lines.push(`**Signature:** ${node.signature}`);
+      lines.push(`**Signature:** \`${node.signature}\``);
     }
 
-    if (node.docstring) {
-      lines.push('', '### Documentation:', '', node.docstring);
+    // Only include docstring if it's short and useful
+    if (node.docstring && node.docstring.length < 200) {
+      lines.push('', node.docstring);
     }
 
     if (code) {
-      lines.push('', '### Code:', '', '```' + node.language, code, '```');
+      lines.push('', '```' + node.language, code, '```');
     }
 
     return lines.join('\n');

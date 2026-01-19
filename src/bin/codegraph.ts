@@ -679,25 +679,14 @@ hooksCommand
 program
   .command('serve')
   .description('Start CodeGraph as an MCP server for AI assistants')
-  .option('-p, --path <path>', 'Project path')
+  .option('-p, --path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
   .option('--mcp', 'Run as MCP server (stdio transport)')
   .action(async (options: { path?: string; mcp?: boolean }) => {
-    const projectPath = resolveProjectPath(options.path);
+    const projectPath = options.path ? resolveProjectPath(options.path) : undefined;
 
     try {
-      if (!CodeGraph.isInitialized(projectPath)) {
-        // In MCP mode, we can't use colored output easily
-        if (options.mcp) {
-          console.error(`CodeGraph not initialized in ${projectPath}. Run 'codegraph init' first.`);
-        } else {
-          error(`CodeGraph not initialized in ${projectPath}`);
-          info('Run "codegraph init" first');
-        }
-        process.exit(1);
-      }
-
       if (options.mcp) {
-        // Start MCP server
+        // Start MCP server - it handles initialization lazily based on rootUri from client
         const { MCPServer } = await import('../mcp/index');
         const server = new MCPServer(projectPath);
         await server.start();
@@ -712,7 +701,7 @@ program
   "mcpServers": {
     "codegraph": {
       "command": "codegraph",
-      "args": ["serve", "--mcp", "--path", "${projectPath}"]
+      "args": ["serve", "--mcp"]
     }
   }
 }

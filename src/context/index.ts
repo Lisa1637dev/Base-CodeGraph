@@ -26,15 +26,20 @@ import { logDebug, logWarn } from '../errors';
 
 /**
  * Default options for context building
+ *
+ * Tuned for minimal context usage while still providing useful results:
+ * - Fewer nodes and code blocks by default
+ * - Smaller code block size limit
+ * - Shallower traversal
  */
 const DEFAULT_BUILD_OPTIONS: Required<BuildContextOptions> = {
-  maxNodes: 50,
-  maxCodeBlocks: 10,
-  maxCodeBlockSize: 2000,
+  maxNodes: 20,           // Reduced from 50 - most tasks don't need 50 symbols
+  maxCodeBlocks: 5,       // Reduced from 10 - only show most relevant code
+  maxCodeBlockSize: 1500, // Reduced from 2000
   includeCode: true,
   format: 'markdown',
-  searchLimit: 5,
-  traversalDepth: 2,
+  searchLimit: 3,         // Reduced from 5 - fewer entry points
+  traversalDepth: 1,      // Reduced from 2 - shallower graph expansion
   minScore: 0.3,
 };
 
@@ -42,9 +47,9 @@ const DEFAULT_BUILD_OPTIONS: Required<BuildContextOptions> = {
  * Default options for finding relevant context
  */
 const DEFAULT_FIND_OPTIONS: Required<FindRelevantContextOptions> = {
-  searchLimit: 5,
-  traversalDepth: 2,
-  maxNodes: 50,
+  searchLimit: 3,        // Reduced from 5
+  traversalDepth: 1,     // Reduced from 2
+  maxNodes: 20,          // Reduced from 50
   minScore: 0.3,
   edgeKinds: [],
   nodeKinds: [],

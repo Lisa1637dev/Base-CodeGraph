@@ -9,57 +9,63 @@ import { Node, Edge, TaskContext, Subgraph } from '../types';
 /**
  * Format context as markdown
  *
- * Creates a structured markdown document optimized for Claude:
- * - Summary section
- * - Structure tree showing relationships
- * - Code blocks with syntax highlighting
- * - Related files list
+ * Creates a compact markdown document optimized for Claude with minimal context usage:
+ * - Brief summary
+ * - Entry points with locations
+ * - Code blocks only for key symbols
  */
 export function formatContextAsMarkdown(context: TaskContext): string {
   const lines: string[] = [];
 
-  // Header
+  // Header with query
   lines.push('## Code Context\n');
-
-  // Summary
   lines.push(`**Query:** ${context.query}\n`);
-  lines.push(context.summary + '\n');
 
-  // Structure section
-  lines.push('### Structure\n');
-  lines.push('```');
-  lines.push(formatSubgraphTree(context.subgraph, context.entryPoints));
-  lines.push('```\n');
+  // Entry points - compact format
+  if (context.entryPoints.length > 0) {
+    lines.push('### Entry Points\n');
+    for (const node of context.entryPoints) {
+      const location = node.startLine ? `:${node.startLine}` : '';
+      lines.push(`- **${node.name}** (${node.kind}) - ${node.filePath}${location}`);
+      if (node.signature) {
+        lines.push(`  \`${node.signature}\``);
+      }
+    }
+    lines.push('');
+  }
 
-  // Code blocks section
+  // Related symbols - compact list (skip verbose structure tree)
+  const otherSymbols = Array.from(context.subgraph.nodes.values())
+    .filter(n => !context.entryPoints.some(e => e.id === n.id))
+    .slice(0, 10); // Limit to 10 related symbols
+
+  if (otherSymbols.length > 0) {
+    lines.push('### Related Symbols\n');
+    const byFile = new Map<string, Node[]>();
+    for (const node of otherSymbols) {
+      const existing = byFile.get(node.filePath) || [];
+      existing.push(node);
+      byFile.set(node.filePath, existing);
+    }
+
+    for (const [file, nodes] of byFile) {
+      const nodeList = nodes.map(n => `${n.name}:${n.startLine}`).join(', ');
+      lines.push(`- ${file}: ${nodeList}`);
+    }
+    lines.push('');
+  }
+
+  // Code blocks - only for key entry points
   if (context.codeBlocks.length > 0) {
     lines.push('### Code\n');
     for (const block of context.codeBlocks) {
       const nodeName = block.node?.name ?? 'Unknown';
-      const nodeKind = block.node?.kind ?? 'unknown';
-      lines.push(`#### ${nodeName} (${nodeKind}) - ${block.filePath}:${block.startLine}\n`);
+      lines.push(`#### ${nodeName} (${block.filePath}:${block.startLine})\n`);
       lines.push('```' + block.language);
       lines.push(block.content);
       lines.push('```\n');
     }
   }
-
-  // Related files section
-  if (context.relatedFiles.length > 0) {
-    lines.push('### Related Files\n');
-    for (const file of context.relatedFiles) {
-      lines.push(`- ${file}`);
-    }
-    lines.push('');
-  }
-
-  // Stats footer
-  lines.push('---');
-  lines.push(
-    `*Context: ${context.stats.nodeCount} symbols, ${context.stats.edgeCount} relationships, ` +
-    `${context.stats.fileCount} files, ${context.stats.codeBlockCount} code blocks ` +
-    `(${formatBytes(context.stats.totalCodeSize)})*`
-  );
 
   return lines.join('\n');
 }
@@ -96,7 +102,7 @@ export function formatContextAsJson(context: TaskContext): string {
 /**
  * Format a subgraph as an ASCII tree structure
  */
-function formatSubgraphTree(subgraph: Subgraph, entryPoints: Node[]): string {
+export function formatSubgraphTree(subgraph: Subgraph, entryPoints: Node[]): string {
   const lines: string[] = [];
   const printed = new Set<string>();
 
@@ -254,7 +260,7 @@ function truncate(str: string, maxLength: number): string {
 /**
  * Format bytes as human-readable string
  */
-function formatBytes(bytes: number): string {
+export function formatBytes(bytes: number): string {
   if (bytes < 1024) {
     return `${bytes} bytes`;
   } else if (bytes < 1024 * 1024) {

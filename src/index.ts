@@ -367,7 +367,19 @@ export class CodeGraph {
    */
   async indexAll(options: IndexOptions = {}): Promise<IndexResult> {
     return this.indexMutex.withLock(async () => {
-      return this.orchestrator.indexAll(options.onProgress, options.signal);
+      const result = await this.orchestrator.indexAll(options.onProgress, options.signal);
+
+      // Resolve references to create call/import/extends edges
+      if (result.success && result.filesIndexed > 0) {
+        options.onProgress?.({
+          phase: 'resolving',
+          current: 0,
+          total: 1,
+        });
+        this.resolveReferences();
+      }
+
+      return result;
     });
   }
 
@@ -389,7 +401,14 @@ export class CodeGraph {
    */
   async sync(options: IndexOptions = {}): Promise<SyncResult> {
     return this.indexMutex.withLock(async () => {
-      return this.orchestrator.sync(options.onProgress);
+      const result = await this.orchestrator.sync(options.onProgress);
+
+      // Resolve references if files were updated
+      if (result.filesAdded > 0 || result.filesModified > 0) {
+        this.resolveReferences();
+      }
+
+      return result;
     });
   }
 

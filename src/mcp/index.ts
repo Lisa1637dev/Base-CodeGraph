@@ -42,31 +42,48 @@ export class MCPServer {
   private transport: StdioTransport;
   private cg: CodeGraph | null = null;
   private toolHandler: ToolHandler | null = null;
-  private projectPath: string;
+  private projectPath: string | null;
+  private initError: string | null = null;
 
-  constructor(projectPath: string) {
-    this.projectPath = projectPath;
+  constructor(projectPath?: string) {
+    this.projectPath = projectPath || null;
     this.transport = new StdioTransport();
   }
 
   /**
    * Start the MCP server
+   *
+   * Note: CodeGraph initialization is deferred until the initialize request
+   * is received, which includes the rootUri from the client.
    */
   async start(): Promise<void> {
-    // Open CodeGraph for the project
-    if (!CodeGraph.isInitialized(this.projectPath)) {
-      throw new Error(`CodeGraph not initialized in ${this.projectPath}. Run 'codegraph init' first.`);
-    }
-
-    this.cg = await CodeGraph.open(this.projectPath);
-    this.toolHandler = new ToolHandler(this.cg);
-
-    // Start listening for messages
+    // Start listening for messages immediately - don't check initialization yet
+    // We'll get the project path from the initialize request's rootUri
     this.transport.start(this.handleMessage.bind(this));
 
     // Keep the process running
     process.on('SIGINT', () => this.stop());
     process.on('SIGTERM', () => this.stop());
+  }
+
+  /**
+   * Initialize CodeGraph for the project
+   */
+  private async initializeCodeGraph(projectPath: string): Promise<void> {
+    this.projectPath = projectPath;
+
+    if (!CodeGraph.isInitialized(projectPath)) {
+      this.initError = `CodeGraph not initialized in ${projectPath}. Run 'codegraph init' first.`;
+      return;
+    }
+
+    try {
+      this.cg = await CodeGraph.open(projectPath);
+      this.toolHandler = new ToolHandler(this.cg);
+      this.initError = null;
+    } catch (err) {
+      this.initError = `Failed to open CodeGraph: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 
   /**
@@ -133,6 +150,29 @@ export class MCPServer {
    * Handle initialize request
    */
   private async handleInitialize(request: JsonRpcRequest): Promise<void> {
+    const params = request.params as {
+      rootUri?: string;
+      workspaceFolders?: Array<{ uri: string; name: string }>;
+    } | undefined;
+
+    // Extract project path from rootUri or workspaceFolders
+    let projectPath = this.projectPath;
+
+    if (params?.rootUri) {
+      // Convert file:// URI to path
+      projectPath = params.rootUri.replace(/^file:\/\//, '');
+    } else if (params?.workspaceFolders?.[0]?.uri) {
+      projectPath = params.workspaceFolders[0].uri.replace(/^file:\/\//, '');
+    }
+
+    // Fall back to current working directory if no path provided
+    if (!projectPath) {
+      projectPath = process.cwd();
+    }
+
+    // Initialize CodeGraph if we have a project path
+    await this.initializeCodeGraph(projectPath);
+
     // We accept the client's protocol version but respond with our supported version
     this.transport.sendResult(request.id, {
       protocolVersion: PROTOCOL_VERSION,
@@ -186,10 +226,14 @@ export class MCPServer {
 
     // Execute the tool
     if (!this.toolHandler) {
+      const errorMsg = this.initError ||
+        (this.projectPath
+          ? `CodeGraph not initialized in ${this.projectPath}. Run 'codegraph init' first.`
+          : 'No project path provided. Ensure Claude Code is running in a project directory.');
       this.transport.sendError(
         request.id,
         ErrorCodes.InternalError,
-        'Server not initialized'
+        errorMsg
       );
       return;
     }

@@ -279,25 +279,30 @@ export function validateEmail(email: string): boolean {
       expect(markdown).not.toContain('### Code');
     });
 
-    it('should include related files', async () => {
+    it('should include related symbols in compact format', async () => {
       const result = await cg.buildContext('checkout', {
         format: 'markdown',
+        maxNodes: 10,
       });
 
       const markdown = result as string;
 
-      expect(markdown).toContain('### Related Files');
+      // Compact format uses "Related Symbols" instead of verbose "Related Files"
+      // and groups symbols by file for compactness
+      expect(markdown).toContain('### Entry Points');
     });
 
-    it('should include stats in the output', async () => {
+    it('should have compact output without verbose stats footer', async () => {
       const result = await cg.buildContext('payment', {
         format: 'markdown',
       });
 
       const markdown = result as string;
 
-      // Should have stats footer
-      expect(markdown).toMatch(/\*Context:.*symbols.*relationships.*files/);
+      // Compact format should NOT have verbose stats footer
+      expect(markdown).not.toMatch(/\*Context:.*symbols.*relationships.*files/);
+      // But should still have query
+      expect(markdown).toContain('**Query:**');
     });
   });
 
