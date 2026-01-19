@@ -5,6 +5,8 @@
  * Command-line interface for CodeGraph code intelligence.
  *
  * Usage:
+ *   codegraph                    Run interactive installer (when no args)
+ *   codegraph install            Run interactive installer
  *   codegraph init [path]        Initialize CodeGraph in a project
  *   codegraph index [path]       Index all files in the project
  *   codegraph sync [path]        Sync changes since last index
@@ -20,6 +22,20 @@ import * as path from 'path';
 import * as fs from 'fs';
 import CodeGraph from '../index';
 import type { IndexProgress } from '../index';
+import { runInstaller } from '../installer';
+
+// Check if running with no arguments - run installer
+if (process.argv.length === 2) {
+  runInstaller().catch((err) => {
+    console.error('Installation failed:', err.message);
+    process.exit(1);
+  });
+} else {
+  // Normal CLI flow
+  main();
+}
+
+function main() {
 
 const program = new Command();
 
@@ -721,5 +737,17 @@ program
     }
   });
 
+/**
+ * codegraph install
+ */
+program
+  .command('install')
+  .description('Run interactive installer for Claude Code integration')
+  .action(async () => {
+    await runInstaller();
+  });
+
 // Parse and run
 program.parse();
+
+} // end main()
