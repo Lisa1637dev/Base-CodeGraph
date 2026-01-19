@@ -4,6 +4,8 @@
  * Defines the tools exposed by the CodeGraph MCP server.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import CodeGraph from '../index';
 import type { Node, SearchResult, Subgraph, TaskContext, NodeKind } from '../types';
 
@@ -179,7 +181,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'codegraph_explore',
-    description: 'RECOMMENDED FOR COMPLEX TASKS: Deep exploration that returns a condensed brief. Internally performs searches, call graph analysis, and checks for EXISTING implementations. IMPORTANT: If results show existing implementations, READ those files before planning - the feature may already exist. For feature requests, use AskUserQuestion to clarify requirements BEFORE making a plan.',
+    description: 'RECOMMENDED FOR COMPLEX TASKS: Deep exploration that READS CODE INTERNALLY and returns synthesis with key snippets. You do NOT need to make separate Read calls - the code is included in the response. Checks for existing implementations, traces data flow, and includes relevant code. For feature requests, use AskUserQuestion to clarify requirements BEFORE planning.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -447,12 +449,13 @@ export class ToolHandler {
   }
 
   /**
-   * Handle codegraph_explore - deep exploration that finds existing implementations
-   * and returns actionable insights
+   * Handle codegraph_explore - deep exploration with internal file reading
+   * Returns synthesized context so Claude doesn't need separate Read calls
    */
   private async handleExplore(args: Record<string, unknown>): Promise<ToolResult> {
     const task = args.task as string;
     const keywordsArg = args.keywords as string | undefined;
+    const projectRoot = this.cg.getProjectRoot();
 
     // Phase 1: Extract search terms
     const keywords = this.extractKeywords(task, keywordsArg);
@@ -471,93 +474,193 @@ export class ToolHandler {
       }
     }
 
-    // Phase 3: Look for EXISTING implementations (key improvement)
-    // Search for common patterns that indicate feature already exists
-    const existingImplementations: string[] = [];
+    // Phase 3: Look for EXISTING implementations
+    const existingImplNodes: Node[] = [];
     const searchPatterns = this.generateExistingPatternSearches(keywords);
 
     for (const pattern of searchPatterns) {
       const results = this.cg.searchNodes(pattern, { limit: 5 });
       for (const r of results) {
         const node = r.node;
-        // Check if this looks like an implementation (not just a type)
         if (['function', 'method', 'component'].includes(node.kind)) {
-          const loc = `${node.filePath}:${node.startLine}`;
-          existingImplementations.push(`${node.name} (${node.kind}) - ${loc}`);
-          symbolMap.set(node.id, node);
-          fileSet.add(node.filePath);
+          if (!symbolMap.has(node.id)) {
+            symbolMap.set(node.id, node);
+            fileSet.add(node.filePath);
+          }
+          existingImplNodes.push(node);
         }
       }
     }
 
-    // Phase 4: Analyze architecture - find similar features to understand patterns
-    const architectureInsights: string[] = [];
-    const allFunctions = Array.from(symbolMap.values())
-      .filter(n => n.kind === 'function' || n.kind === 'method' || n.kind === 'component');
+    // Phase 4: Categorize symbols by type
+    const allSymbols = Array.from(symbolMap.values());
+    const functions = allSymbols.filter(n => n.kind === 'function' || n.kind === 'method');
+    const components = allSymbols.filter(n => n.kind === 'component');
+    const types = allSymbols.filter(n => n.kind === 'interface' || n.kind === 'type_alias');
+    const apiRoutes = allSymbols.filter(n => n.filePath.includes('/api/') || n.kind === 'route');
 
-    // Look for hooks, handlers, dialogs, cards - common UI patterns
-    const hooks = allFunctions.filter(n => n.name.startsWith('use'));
-    const handlers = allFunctions.filter(n => n.name.startsWith('handle'));
-    const dialogs = Array.from(symbolMap.values()).filter(n =>
-      n.name.toLowerCase().includes('dialog') || n.name.toLowerCase().includes('modal'));
-    const apiRoutes = Array.from(symbolMap.values()).filter(n =>
-      n.filePath.includes('/api/') || n.kind === 'route');
+    // Phase 5: READ CODE INTERNALLY for key symbols (the sub-agent behavior)
+    // Prioritize: existing implementations > API routes > types > functions
+    const codeSnippets: Array<{ node: Node; code: string }> = [];
+    const maxSnippets = 8;
+    const maxCodeLength = 1500; // chars per snippet
 
-    if (hooks.length > 0) {
-      architectureInsights.push(`Hooks: ${hooks.slice(0, 3).map(h => h.name).join(', ')}`);
-    }
-    if (handlers.length > 0) {
-      architectureInsights.push(`Handlers: ${handlers.slice(0, 3).map(h => h.name).join(', ')}`);
-    }
-    if (dialogs.length > 0) {
-      architectureInsights.push(`Dialogs: ${dialogs.slice(0, 3).map(d => d.name).join(', ')}`);
-    }
-    if (apiRoutes.length > 0) {
-      architectureInsights.push(`API: ${apiRoutes.slice(0, 3).map(r => r.filePath.split('/api/')[1] || r.name).join(', ')}`);
-    }
+    const priorityNodes = [
+      ...existingImplNodes.slice(0, 3),
+      ...apiRoutes.slice(0, 2),
+      ...types.slice(0, 2),
+      ...components.slice(0, 2),
+      ...functions.filter(n => !existingImplNodes.includes(n)).slice(0, 1),
+    ];
 
-    // Phase 5: Trace call graphs to understand data flow
-    const callGraphInsights: string[] = [];
-    const topSymbols = allFunctions.slice(0, 5);
+    for (const node of priorityNodes) {
+      if (codeSnippets.length >= maxSnippets) break;
 
-    for (const symbol of topSymbols) {
-      const callers = this.cg.getCallers(symbol.id);
-      const callees = this.cg.getCallees(symbol.id);
-
-      if (callers.length > 0 || callees.length > 0) {
-        const callerNames = callers.slice(0, 2).map(c => c.node.name).join(', ');
-        const calleeNames = callees.slice(0, 2).map(c => c.node.name).join(', ');
-
-        let insight = symbol.name;
-        if (callers.length > 0) insight += ` ←${callerNames}`;
-        if (callees.length > 0) insight += ` →${calleeNames}`;
-        callGraphInsights.push(insight);
+      const code = this.extractNodeCode(projectRoot, node, maxCodeLength);
+      if (code) {
+        codeSnippets.push({ node, code });
       }
     }
 
-    // Phase 6: Identify key types
-    const interfaces = Array.from(symbolMap.values())
-      .filter(n => n.kind === 'interface' || n.kind === 'type_alias');
-    const components = Array.from(symbolMap.values()).filter(n => n.kind === 'component');
+    // Phase 6: Trace call graphs for data flow understanding
+    const dataFlowInsights: string[] = [];
+    for (const node of existingImplNodes.slice(0, 3)) {
+      const callers = this.cg.getCallers(node.id);
+      const callees = this.cg.getCallees(node.id);
 
-    // Phase 7: Build compact brief with insights
+      if (callers.length > 0 || callees.length > 0) {
+        let flow = `${node.name}`;
+        if (callers.length > 0) flow = `${callers.slice(0, 2).map(c => c.node.name).join(', ')} → ${flow}`;
+        if (callees.length > 0) flow = `${flow} → ${callees.slice(0, 2).map(c => c.node.name).join(', ')}`;
+        dataFlowInsights.push(flow);
+      }
+    }
+
+    // Phase 7: Build comprehensive synthesis
     const isFeatureQuery = this.looksLikeFeatureRequest(task);
-    const hasExistingImpl = existingImplementations.length > 0;
+    const hasExistingImpl = existingImplNodes.length > 0;
 
-    const brief = this.buildExploreBriefV2({
+    const synthesis = this.buildExploreSynthesis({
       task,
-      files: Array.from(fileSet),
-      existingImplementations,
-      architectureInsights,
-      callGraphInsights,
-      interfaces,
-      components,
+      existingImplNodes,
+      codeSnippets,
+      types,
+      apiRoutes,
+      dataFlowInsights,
       totalSymbols: symbolMap.size,
+      totalFiles: fileSet.size,
       isFeatureQuery,
       hasExistingImpl,
     });
 
-    return this.textResult(brief);
+    return this.textResult(synthesis);
+  }
+
+  /**
+   * Extract code from a node's source file
+   */
+  private extractNodeCode(projectRoot: string, node: Node, maxLength: number): string | null {
+    const filePath = path.join(projectRoot, node.filePath);
+
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const lines = content.split('\n');
+
+      const startIdx = Math.max(0, node.startLine - 1);
+      const endIdx = Math.min(lines.length, node.endLine);
+
+      let code = lines.slice(startIdx, endIdx).join('\n');
+
+      // Truncate if too long
+      if (code.length > maxLength) {
+        code = code.slice(0, maxLength) + '\n// ... truncated ...';
+      }
+
+      return code;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Build comprehensive synthesis with code included
+   */
+  private buildExploreSynthesis(data: {
+    task: string;
+    existingImplNodes: Node[];
+    codeSnippets: Array<{ node: Node; code: string }>;
+    types: Node[];
+    apiRoutes: Node[];
+    dataFlowInsights: string[];
+    totalSymbols: number;
+    totalFiles: number;
+    isFeatureQuery: boolean;
+    hasExistingImpl: boolean;
+  }): string {
+    const lines: string[] = [];
+
+    // Critical warnings at TOP
+    if (data.hasExistingImpl) {
+      lines.push('⚠️ **EXISTING IMPLEMENTATIONS FOUND** - Review code below before planning. Feature may already exist.');
+      lines.push('');
+    }
+    if (data.isFeatureQuery) {
+      lines.push('📋 **BEFORE PLANNING:** Use `AskUserQuestion` to clarify UX preferences and requirements.');
+      lines.push('');
+    }
+
+    // Summary stats
+    lines.push(`**Explored ${data.totalSymbols} symbols across ${data.totalFiles} files**`);
+    lines.push('');
+
+    // Data flow (if available)
+    if (data.dataFlowInsights.length > 0) {
+      lines.push('**Data Flow:**');
+      for (const flow of data.dataFlowInsights.slice(0, 3)) {
+        lines.push(`  ${flow}`);
+      }
+      lines.push('');
+    }
+
+    // Key types (signatures only, no code)
+    if (data.types.length > 0) {
+      lines.push('**Key Types:**');
+      for (const t of data.types.slice(0, 4)) {
+        lines.push(`  - \`${t.name}\` (${t.filePath}:${t.startLine})`);
+      }
+      lines.push('');
+    }
+
+    // API routes (signatures only)
+    if (data.apiRoutes.length > 0) {
+      lines.push('**API Routes:**');
+      for (const r of data.apiRoutes.slice(0, 3)) {
+        const routePath = r.filePath.split('/api/')[1] || r.filePath;
+        lines.push(`  - \`/api/${routePath}\` (${r.name})`);
+      }
+      lines.push('');
+    }
+
+    // CODE SNIPPETS - the key sub-agent behavior
+    if (data.codeSnippets.length > 0) {
+      lines.push('---');
+      lines.push('**Key Code (read internally):**');
+      lines.push('');
+
+      for (const { node, code } of data.codeSnippets) {
+        lines.push(`### ${node.name} (${node.kind}) - ${node.filePath}:${node.startLine}`);
+        lines.push('```' + (node.language || 'typescript'));
+        lines.push(code);
+        lines.push('```');
+        lines.push('');
+      }
+    }
+
+    return lines.join('\n');
   }
 
   /**
@@ -605,71 +708,6 @@ export class ToolHandler {
     }
 
     return [...new Set(patterns)];
-  }
-
-  /**
-   * Build compact brief with existing implementation focus
-   */
-  private buildExploreBriefV2(data: {
-    task: string;
-    files: string[];
-    existingImplementations: string[];
-    architectureInsights: string[];
-    callGraphInsights: string[];
-    interfaces: Node[];
-    components: Node[];
-    totalSymbols: number;
-    isFeatureQuery: boolean;
-    hasExistingImpl: boolean;
-  }): string {
-    const lines: string[] = [];
-
-    // CRITICAL: Action items at TOP (not bottom) so Claude sees them first
-    if (data.hasExistingImpl) {
-      lines.push('⚠️ **STOP: Similar implementations exist!** Read the files below to check if this feature already exists before planning.');
-      lines.push('');
-    }
-    if (data.isFeatureQuery) {
-      lines.push('📋 **BEFORE PLANNING:** Use `AskUserQuestion` to clarify UX preferences, edge cases, and acceptance criteria.');
-      lines.push('');
-    }
-
-    // Stats
-    lines.push(`**${data.totalSymbols} symbols in ${data.files.length} files**`);
-
-    // Existing implementations - now with context that these need verification
-    if (data.existingImplementations.length > 0) {
-      lines.push('');
-      lines.push('🔍 **Existing implementations to verify:**');
-      for (const impl of data.existingImplementations.slice(0, 5)) {
-        lines.push(`  - ${impl}`);
-      }
-    }
-
-    // Architecture patterns
-    if (data.architectureInsights.length > 0) {
-      lines.push('');
-      lines.push(`**Patterns:** ${data.architectureInsights.join(' | ')}`);
-    }
-
-    // Data flow (compact)
-    if (data.callGraphInsights.length > 0) {
-      lines.push(`**Flow:** ${data.callGraphInsights.slice(0, 3).join(' | ')}`);
-    }
-
-    // Key types
-    if (data.interfaces.length > 0) {
-      const types = data.interfaces.slice(0, 4).map(t => `${t.name}:${t.startLine}`);
-      lines.push(`**Types:** ${types.join(', ')}`);
-    }
-
-    // Key files to read
-    if (data.files.length > 0) {
-      lines.push('');
-      lines.push(`**Read:** ${data.files.slice(0, 3).join(', ')}`);
-    }
-
-    return lines.join('\n');
   }
 
   /**
