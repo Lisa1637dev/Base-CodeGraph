@@ -135,33 +135,45 @@ Create or append to `~/.claude/CLAUDE.md`:
 ```markdown
 ## CodeGraph
 
-CodeGraph builds a semantic knowledge graph of codebases for better code exploration.
+CodeGraph builds a semantic knowledge graph of codebases for faster, smarter code exploration.
 
 ### If `.codegraph/` exists in the project
 
-**For complex tasks (features, refactoring, multi-file changes):**
-Use `codegraph_explore` first - it does deep exploration internally and returns a condensed brief, keeping your context clean:
+**Use codegraph tools for faster exploration.** These tools provide instant lookups via the code graph instead of scanning files:
 
-codegraph_explore(task: "implement bundle product swapping", keywords: "bundle,swap,subscription")
+| Tool | Use For |
+|------|---------|
+| `codegraph_search` | Find symbols by name (functions, classes, types) |
+| `codegraph_context` | Get relevant code context for a task |
+| `codegraph_callers` | Find what calls a function |
+| `codegraph_callees` | Find what a function calls |
+| `codegraph_impact` | See what's affected by changing a symbol |
+| `codegraph_node` | Get details + source code for a symbol |
 
-**For simple lookups**, use targeted tools:
-- `codegraph_search` - Find symbols by name
-- `codegraph_context` - Get context for a task/issue
-- `codegraph_callers` - Find what calls a function
-- `codegraph_callees` - Find what a function calls
-- `codegraph_impact` - See what's affected by changing a symbol
-- `codegraph_node` - Get details about a specific symbol
-- `codegraph_status` - Check index status
+**When spawning Explore agents in a codegraph-enabled project:**
 
-**Important:** CodeGraph provides CODE context, not product requirements. For new features, still ask the user about UX preferences, edge cases, and acceptance criteria before implementing.
+Tell the Explore agent to use codegraph tools for faster exploration:
 
-The index auto-updates via git post-commit hook, so no manual sync needed.
+Explore the codebase to understand [task].
+
+This project has CodeGraph initialized - use these tools for faster lookups:
+- codegraph_search to find relevant symbols
+- codegraph_callers/codegraph_callees to trace call graphs
+- codegraph_context to get related code for the task
+- codegraph_node with includeCode=true to read specific functions
+
+**For quick lookups in the main session:**
+- Use `codegraph_search` instead of grep for finding symbols
+- Use `codegraph_callers`/`codegraph_callees` to trace code flow
+- Use `codegraph_impact` before making changes to see what's affected
+
+**Note:** CodeGraph provides CODE context, not product requirements. For new features, clarify UX preferences with the user before implementing.
 
 ### If `.codegraph/` does NOT exist
 
-At the start of a session, ask the user if they'd like to initialize CodeGraph for better code intelligence:
+At the start of a session, ask the user if they'd like to initialize CodeGraph:
 
-"I notice this project doesn't have CodeGraph initialized. Would you like me to run `codegraph init -i` to build a code knowledge graph? This enables smarter code exploration, caller/callee analysis, and impact detection."
+"I notice this project doesn't have CodeGraph initialized. Would you like me to run `codegraph init -i` to build a code knowledge graph? This enables faster code exploration via semantic search and call graph analysis."
 
 If they agree, run:
 codegraph init -i
