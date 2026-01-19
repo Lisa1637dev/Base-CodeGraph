@@ -276,7 +276,7 @@ export class ToolHandler {
     // Detect if this looks like a feature request (vs bug fix or exploration)
     const isFeatureQuery = this.looksLikeFeatureRequest(task);
     const reminder = isFeatureQuery
-      ? '\n\n---\n**Note:** This is code context only. For new features, consider asking the user about UX preferences, edge cases, and acceptance criteria before implementing.'
+      ? '\n\n⚠️ **Ask user:** UX preferences, edge cases, acceptance criteria'
       : '';
 
     // buildContext returns string when format is 'markdown'
@@ -447,22 +447,21 @@ export class ToolHandler {
   }
 
   /**
-   * Handle codegraph_explore - the "sub-agent" that does intensive exploration
-   * and returns a condensed brief
+   * Handle codegraph_explore - deep exploration that finds existing implementations
+   * and returns actionable insights
    */
   private async handleExplore(args: Record<string, unknown>): Promise<ToolResult> {
     const task = args.task as string;
-    const focus = args.focus as string | undefined;
     const keywordsArg = args.keywords as string | undefined;
 
     // Phase 1: Extract search terms
     const keywords = this.extractKeywords(task, keywordsArg);
 
-    // Phase 2: Find relevant symbols (internal, not returned directly)
+    // Phase 2: Find relevant symbols
     const symbolMap = new Map<string, Node>();
     const fileSet = new Set<string>();
 
-    for (const keyword of keywords.slice(0, 5)) { // Limit to 5 keywords
+    for (const keyword of keywords.slice(0, 5)) {
       const results = this.cg.searchNodes(keyword, { limit: 10 });
       for (const r of results) {
         if (!symbolMap.has(r.node.id)) {
@@ -472,54 +471,194 @@ export class ToolHandler {
       }
     }
 
-    // Phase 3: Analyze call relationships for top symbols
+    // Phase 3: Look for EXISTING implementations (key improvement)
+    // Search for common patterns that indicate feature already exists
+    const existingImplementations: string[] = [];
+    const searchPatterns = this.generateExistingPatternSearches(keywords);
+
+    for (const pattern of searchPatterns) {
+      const results = this.cg.searchNodes(pattern, { limit: 5 });
+      for (const r of results) {
+        const node = r.node;
+        // Check if this looks like an implementation (not just a type)
+        if (['function', 'method', 'component'].includes(node.kind)) {
+          const loc = `${node.filePath}:${node.startLine}`;
+          existingImplementations.push(`${node.name} (${node.kind}) - ${loc}`);
+          symbolMap.set(node.id, node);
+          fileSet.add(node.filePath);
+        }
+      }
+    }
+
+    // Phase 4: Analyze architecture - find similar features to understand patterns
+    const architectureInsights: string[] = [];
+    const allFunctions = Array.from(symbolMap.values())
+      .filter(n => n.kind === 'function' || n.kind === 'method' || n.kind === 'component');
+
+    // Look for hooks, handlers, dialogs, cards - common UI patterns
+    const hooks = allFunctions.filter(n => n.name.startsWith('use'));
+    const handlers = allFunctions.filter(n => n.name.startsWith('handle'));
+    const dialogs = Array.from(symbolMap.values()).filter(n =>
+      n.name.toLowerCase().includes('dialog') || n.name.toLowerCase().includes('modal'));
+    const apiRoutes = Array.from(symbolMap.values()).filter(n =>
+      n.filePath.includes('/api/') || n.kind === 'route');
+
+    if (hooks.length > 0) {
+      architectureInsights.push(`Hooks: ${hooks.slice(0, 3).map(h => h.name).join(', ')}`);
+    }
+    if (handlers.length > 0) {
+      architectureInsights.push(`Handlers: ${handlers.slice(0, 3).map(h => h.name).join(', ')}`);
+    }
+    if (dialogs.length > 0) {
+      architectureInsights.push(`Dialogs: ${dialogs.slice(0, 3).map(d => d.name).join(', ')}`);
+    }
+    if (apiRoutes.length > 0) {
+      architectureInsights.push(`API: ${apiRoutes.slice(0, 3).map(r => r.filePath.split('/api/')[1] || r.name).join(', ')}`);
+    }
+
+    // Phase 5: Trace call graphs to understand data flow
     const callGraphInsights: string[] = [];
-    const topSymbols = Array.from(symbolMap.values())
-      .filter(n => n.kind === 'function' || n.kind === 'method' || n.kind === 'component')
-      .slice(0, 5);
+    const topSymbols = allFunctions.slice(0, 5);
 
     for (const symbol of topSymbols) {
       const callers = this.cg.getCallers(symbol.id);
       const callees = this.cg.getCallees(symbol.id);
 
       if (callers.length > 0 || callees.length > 0) {
-        const callerNames = callers.slice(0, 3).map(c => c.node.name).join(', ');
-        const calleeNames = callees.slice(0, 3).map(c => c.node.name).join(', ');
+        const callerNames = callers.slice(0, 2).map(c => c.node.name).join(', ');
+        const calleeNames = callees.slice(0, 2).map(c => c.node.name).join(', ');
 
-        let insight = `**${symbol.name}**`;
-        if (callers.length > 0) insight += ` ← called by: ${callerNames}${callers.length > 3 ? '...' : ''}`;
-        if (callees.length > 0) insight += ` → calls: ${calleeNames}${callees.length > 3 ? '...' : ''}`;
+        let insight = symbol.name;
+        if (callers.length > 0) insight += ` ←${callerNames}`;
+        if (callees.length > 0) insight += ` →${calleeNames}`;
         callGraphInsights.push(insight);
       }
     }
 
-    // Phase 4: Identify key entry points and patterns
+    // Phase 6: Identify key types
+    const interfaces = Array.from(symbolMap.values())
+      .filter(n => n.kind === 'interface' || n.kind === 'type_alias');
     const components = Array.from(symbolMap.values()).filter(n => n.kind === 'component');
-    const routes = Array.from(symbolMap.values()).filter(n => n.kind === 'route');
-    const interfaces = Array.from(symbolMap.values()).filter(n => n.kind === 'interface' || n.kind === 'type_alias');
-    const functions = Array.from(symbolMap.values()).filter(n => n.kind === 'function' || n.kind === 'method');
 
-    // Phase 5: Build condensed brief
-    const brief = this.buildExploreBrief({
+    // Phase 7: Build compact brief with insights
+    const brief = this.buildExploreBriefV2({
       task,
-      focus,
-      keywords,
       files: Array.from(fileSet),
-      components,
-      routes,
-      interfaces,
-      functions,
+      existingImplementations,
+      architectureInsights,
       callGraphInsights,
+      interfaces,
+      components,
       totalSymbols: symbolMap.size,
     });
 
     // Add feature request reminder if applicable
     const isFeatureQuery = this.looksLikeFeatureRequest(task);
     const reminder = isFeatureQuery
-      ? '\n\n---\n**Before implementing:** Clarify with the user: UX preferences, edge cases, error handling, and acceptance criteria.'
+      ? '\n\n⚠️ **Ask user:** UX preferences, edge cases, acceptance criteria'
       : '';
 
     return this.textResult(brief + reminder);
+  }
+
+  /**
+   * Generate search patterns to find existing implementations
+   * Language-agnostic: generates patterns for multiple naming conventions
+   */
+  private generateExistingPatternSearches(keywords: string[]): string[] {
+    const patterns: string[] = [];
+
+    for (const keyword of keywords.slice(0, 3)) {
+      // Skip very short or common words
+      if (keyword.length < 3) continue;
+
+      const lower = keyword.toLowerCase();
+      const capitalized = keyword.charAt(0).toUpperCase() + keyword.slice(1).toLowerCase();
+
+      // The keyword itself in various cases
+      patterns.push(lower);
+      patterns.push(capitalized);
+
+      // Common suffixes (work across most languages)
+      // These patterns find: SwapService, swap_service, SwapHandler, etc.
+      const suffixes = ['Service', 'Handler', 'Controller', 'Manager', 'Helper', 'Util', 'Utils'];
+      for (const suffix of suffixes) {
+        patterns.push(`${capitalized}${suffix}`);     // PascalCase: SwapService
+        patterns.push(`${lower}_${suffix.toLowerCase()}`); // snake_case: swap_service
+      }
+
+      // Common prefixes (work across most languages)
+      const prefixes = ['handle', 'process', 'do', 'execute', 'perform', 'run'];
+      for (const prefix of prefixes) {
+        patterns.push(`${prefix}_${lower}`);          // snake_case: handle_swap
+        patterns.push(`${prefix}${capitalized}`);     // camelCase: handleSwap
+      }
+
+      // Common action patterns
+      patterns.push(`create_${lower}`);
+      patterns.push(`update_${lower}`);
+      patterns.push(`delete_${lower}`);
+      patterns.push(`get_${lower}`);
+      patterns.push(`create${capitalized}`);
+      patterns.push(`update${capitalized}`);
+      patterns.push(`delete${capitalized}`);
+      patterns.push(`get${capitalized}`);
+    }
+
+    return [...new Set(patterns)];
+  }
+
+  /**
+   * Build compact brief with existing implementation focus
+   */
+  private buildExploreBriefV2(data: {
+    task: string;
+    files: string[];
+    existingImplementations: string[];
+    architectureInsights: string[];
+    callGraphInsights: string[];
+    interfaces: Node[];
+    components: Node[];
+    totalSymbols: number;
+  }): string {
+    const lines: string[] = [];
+
+    // Stats
+    lines.push(`**${data.totalSymbols} symbols in ${data.files.length} files**`);
+
+    // MOST IMPORTANT: Existing implementations found
+    if (data.existingImplementations.length > 0) {
+      lines.push('');
+      lines.push('🔍 **Existing implementations found:**');
+      for (const impl of data.existingImplementations.slice(0, 5)) {
+        lines.push(`  - ${impl}`);
+      }
+    }
+
+    // Architecture patterns
+    if (data.architectureInsights.length > 0) {
+      lines.push('');
+      lines.push(`**Patterns:** ${data.architectureInsights.join(' | ')}`);
+    }
+
+    // Data flow (compact)
+    if (data.callGraphInsights.length > 0) {
+      lines.push(`**Flow:** ${data.callGraphInsights.slice(0, 3).join(' | ')}`);
+    }
+
+    // Key types
+    if (data.interfaces.length > 0) {
+      const types = data.interfaces.slice(0, 4).map(t => `${t.name}:${t.startLine}`);
+      lines.push(`**Types:** ${types.join(', ')}`);
+    }
+
+    // Key files to read
+    if (data.files.length > 0) {
+      lines.push('');
+      lines.push(`**Read:** ${data.files.slice(0, 3).join(', ')}`);
+    }
+
+    return lines.join('\n');
   }
 
   /**
@@ -557,95 +696,6 @@ export class ToolHandler {
 
     // Deduplicate and return
     return [...new Set(keywords)];
-  }
-
-  /**
-   * Build a condensed exploration brief
-   */
-  private buildExploreBrief(data: {
-    task: string;
-    focus?: string;
-    keywords: string[];
-    files: string[];
-    components: Node[];
-    routes: Node[];
-    interfaces: Node[];
-    functions: Node[];
-    callGraphInsights: string[];
-    totalSymbols: number;
-  }): string {
-    const lines: string[] = [
-      '## Exploration Brief',
-      '',
-      `**Task:** ${data.task}`,
-      `**Found:** ${data.totalSymbols} relevant symbols across ${data.files.length} files`,
-      '',
-    ];
-
-    // Key files (grouped by directory)
-    if (data.files.length > 0) {
-      lines.push('### Key Files');
-      const topFiles = data.files.slice(0, 10);
-      for (const file of topFiles) {
-        lines.push(`- ${file}`);
-      }
-      if (data.files.length > 10) {
-        lines.push(`- ... and ${data.files.length - 10} more`);
-      }
-      lines.push('');
-    }
-
-    // Entry points
-    const entryPoints: string[] = [];
-    if (data.components.length > 0) {
-      entryPoints.push(`**Components:** ${data.components.slice(0, 5).map(n => `${n.name} (${n.filePath}:${n.startLine})`).join(', ')}`);
-    }
-    if (data.routes.length > 0) {
-      entryPoints.push(`**Routes:** ${data.routes.slice(0, 5).map(n => `${n.name} (${n.filePath}:${n.startLine})`).join(', ')}`);
-    }
-    if (entryPoints.length > 0) {
-      lines.push('### Entry Points');
-      lines.push(...entryPoints);
-      lines.push('');
-    }
-
-    // Key types/interfaces
-    if (data.interfaces.length > 0) {
-      lines.push('### Key Types');
-      for (const iface of data.interfaces.slice(0, 5)) {
-        lines.push(`- **${iface.name}** - ${iface.filePath}:${iface.startLine}`);
-      }
-      lines.push('');
-    }
-
-    // Key functions
-    if (data.functions.length > 0) {
-      lines.push('### Key Functions');
-      for (const fn of data.functions.slice(0, 8)) {
-        const sig = fn.signature ? ` - \`${fn.signature.slice(0, 60)}${fn.signature.length > 60 ? '...' : ''}\`` : '';
-        lines.push(`- **${fn.name}** (${fn.filePath}:${fn.startLine})${sig}`);
-      }
-      lines.push('');
-    }
-
-    // Call graph insights
-    if (data.callGraphInsights.length > 0) {
-      lines.push('### Data Flow');
-      for (const insight of data.callGraphInsights.slice(0, 6)) {
-        lines.push(`- ${insight}`);
-      }
-      lines.push('');
-    }
-
-    // Suggested files to read (actionable)
-    lines.push('### Suggested Next Steps');
-    lines.push('Read these files for implementation details:');
-    const suggestedFiles = data.files.slice(0, 3);
-    for (const file of suggestedFiles) {
-      lines.push(`1. \`${file}\``);
-    }
-
-    return lines.join('\n');
   }
 
   // =========================================================================
