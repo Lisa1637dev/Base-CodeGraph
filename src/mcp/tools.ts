@@ -179,7 +179,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'codegraph_explore',
-    description: 'RECOMMENDED FOR COMPLEX TASKS: Deep exploration that returns a condensed brief. Internally performs multiple searches, call graph analysis, and impact assessment - then synthesizes results into a compact summary. Use this instead of multiple codegraph_* calls to keep your context clean. Returns: key files, critical functions, data flow summary, and suggested approach.',
+    description: 'RECOMMENDED FOR COMPLEX TASKS: Deep exploration that returns a condensed brief. Internally performs searches, call graph analysis, and checks for EXISTING implementations. IMPORTANT: If results show existing implementations, READ those files before planning - the feature may already exist. For feature requests, use AskUserQuestion to clarify requirements BEFORE making a plan.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -541,6 +541,9 @@ export class ToolHandler {
     const components = Array.from(symbolMap.values()).filter(n => n.kind === 'component');
 
     // Phase 7: Build compact brief with insights
+    const isFeatureQuery = this.looksLikeFeatureRequest(task);
+    const hasExistingImpl = existingImplementations.length > 0;
+
     const brief = this.buildExploreBriefV2({
       task,
       files: Array.from(fileSet),
@@ -550,15 +553,11 @@ export class ToolHandler {
       interfaces,
       components,
       totalSymbols: symbolMap.size,
+      isFeatureQuery,
+      hasExistingImpl,
     });
 
-    // Add feature request reminder if applicable
-    const isFeatureQuery = this.looksLikeFeatureRequest(task);
-    const reminder = isFeatureQuery
-      ? '\n\n⚠️ **Ask user:** UX preferences, edge cases, acceptance criteria'
-      : '';
-
-    return this.textResult(brief + reminder);
+    return this.textResult(brief);
   }
 
   /**
@@ -620,16 +619,28 @@ export class ToolHandler {
     interfaces: Node[];
     components: Node[];
     totalSymbols: number;
+    isFeatureQuery: boolean;
+    hasExistingImpl: boolean;
   }): string {
     const lines: string[] = [];
+
+    // CRITICAL: Action items at TOP (not bottom) so Claude sees them first
+    if (data.hasExistingImpl) {
+      lines.push('⚠️ **STOP: Similar implementations exist!** Read the files below to check if this feature already exists before planning.');
+      lines.push('');
+    }
+    if (data.isFeatureQuery) {
+      lines.push('📋 **BEFORE PLANNING:** Use `AskUserQuestion` to clarify UX preferences, edge cases, and acceptance criteria.');
+      lines.push('');
+    }
 
     // Stats
     lines.push(`**${data.totalSymbols} symbols in ${data.files.length} files**`);
 
-    // MOST IMPORTANT: Existing implementations found
+    // Existing implementations - now with context that these need verification
     if (data.existingImplementations.length > 0) {
       lines.push('');
-      lines.push('🔍 **Existing implementations found:**');
+      lines.push('🔍 **Existing implementations to verify:**');
       for (const impl of data.existingImplementations.slice(0, 5)) {
         lines.push(`  - ${impl}`);
       }
