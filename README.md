@@ -55,8 +55,6 @@ Building context...
 | **Tokens per task** | ~40,000 | ~0 (local) | **40,000 saved** |
 | **Cost per exploration** | $0.50-2.00 | $0.00 | **Free** |
 
-> *Tested on real-world "implement Sign in with Apple" task across 25-file codebase*
-
 ---
 
 ## ✨ Key Features
