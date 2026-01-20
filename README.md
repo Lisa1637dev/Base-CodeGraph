@@ -160,6 +160,7 @@ npx @colbymchenry/codegraph
 The interactive installer will:
 - Configure the MCP server in `~/.claude.json`
 - Set up auto-allow permissions for CodeGraph tools
+- Add global instructions to `~/.claude/CLAUDE.md` (teaches Claude how to use CodeGraph)
 - Optionally initialize your current project
 
 ### 2. Restart Claude Code
@@ -220,9 +221,9 @@ npm install -g @colbymchenry/codegraph
 </details>
 
 <details>
-<summary><strong>Recommended: Add Global Instructions</strong></summary>
+<summary><strong>Global Instructions Reference</strong></summary>
 
-For best results, add to `~/.claude/CLAUDE.md`:
+The installer automatically adds these instructions to `~/.claude/CLAUDE.md`. This is provided here for reference:
 
 ```markdown
 ## CodeGraph
@@ -299,7 +300,8 @@ The installer will:
 1. Ask for installation location (global `~/.claude` or local `./.claude`)
 2. Configure the MCP server in `claude.json`
 3. Optionally set up auto-allow permissions
-4. For local installs: initialize and index the current project
+4. Add global instructions to `~/.claude/CLAUDE.md` (teaches Claude how to use CodeGraph)
+5. For local installs: initialize and index the current project
 
 ### `codegraph init [path]`
 
