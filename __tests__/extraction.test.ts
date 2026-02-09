@@ -290,6 +290,174 @@ export const fetchData = async () => {
   });
 });
 
+describe('Type Alias Extraction', () => {
+  it('should extract exported type aliases in TypeScript', () => {
+    const code = `
+export type AuthContextValue = {
+  user: User | null;
+  login: () => void;
+  logout: () => void;
+};
+`;
+    const result = extractFromSource('types.ts', code);
+
+    expect(result.nodes).toHaveLength(1);
+    expect(result.nodes[0]).toMatchObject({
+      kind: 'type_alias',
+      name: 'AuthContextValue',
+      isExported: true,
+    });
+  });
+
+  it('should extract non-exported type aliases', () => {
+    const code = `
+type InternalState = {
+  loading: boolean;
+  error: string | null;
+};
+`;
+    const result = extractFromSource('internal.ts', code);
+
+    expect(result.nodes).toHaveLength(1);
+    expect(result.nodes[0]).toMatchObject({
+      kind: 'type_alias',
+      name: 'InternalState',
+      isExported: false,
+    });
+  });
+
+  it('should extract multiple type aliases from the same file', () => {
+    const code = `
+export type UnitSystem = 'metric' | 'imperial';
+export type DateFormat = 'ISO' | 'US' | 'EU';
+type Internal = string;
+`;
+    const result = extractFromSource('config.ts', code);
+
+    const typeAliases = result.nodes.filter((n) => n.kind === 'type_alias');
+    expect(typeAliases).toHaveLength(3);
+
+    const exported = typeAliases.filter((n) => n.isExported);
+    expect(exported).toHaveLength(2);
+    expect(exported.map((n) => n.name).sort()).toEqual(['DateFormat', 'UnitSystem']);
+  });
+});
+
+describe('Exported Variable Extraction', () => {
+  it('should extract exported const with call expression (Zustand store)', () => {
+    const code = `
+export const useUIStore = create<UIState>((set) => ({
+  isOpen: false,
+  toggle: () => set((s) => ({ isOpen: !s.isOpen })),
+}));
+`;
+    const result = extractFromSource('store.ts', code);
+
+    const varNode = result.nodes.find((n) => n.kind === 'variable' && n.name === 'useUIStore');
+    expect(varNode).toBeDefined();
+    expect(varNode?.isExported).toBe(true);
+  });
+
+  it('should extract exported const with object literal', () => {
+    const code = `
+export const config = {
+  apiUrl: 'https://api.example.com',
+  timeout: 5000,
+};
+`;
+    const result = extractFromSource('config.ts', code);
+
+    const varNode = result.nodes.find((n) => n.kind === 'variable' && n.name === 'config');
+    expect(varNode).toBeDefined();
+    expect(varNode?.isExported).toBe(true);
+  });
+
+  it('should extract exported const with array literal', () => {
+    const code = `
+export const SCREEN_NAMES = ['home', 'settings', 'profile'] as const;
+`;
+    const result = extractFromSource('constants.ts', code);
+
+    const varNode = result.nodes.find((n) => n.kind === 'variable' && n.name === 'SCREEN_NAMES');
+    expect(varNode).toBeDefined();
+    expect(varNode?.isExported).toBe(true);
+  });
+
+  it('should extract exported const with primitive value', () => {
+    const code = `
+export const MAX_RETRIES = 3;
+export const API_VERSION = "v2";
+`;
+    const result = extractFromSource('constants.ts', code);
+
+    const variables = result.nodes.filter((n) => n.kind === 'variable');
+    expect(variables).toHaveLength(2);
+    expect(variables.map((n) => n.name).sort()).toEqual(['API_VERSION', 'MAX_RETRIES']);
+  });
+
+  it('should NOT duplicate arrow functions as both function and variable', () => {
+    const code = `
+export const useAuth = () => {
+  return useContext(AuthContext);
+};
+`;
+    const result = extractFromSource('hooks.ts', code);
+
+    // Should be extracted as function (from arrow function handler), NOT as variable
+    const funcNodes = result.nodes.filter((n) => n.kind === 'function' && n.name === 'useAuth');
+    const varNodes = result.nodes.filter((n) => n.kind === 'variable' && n.name === 'useAuth');
+    expect(funcNodes).toHaveLength(1);
+    expect(varNodes).toHaveLength(0);
+  });
+
+  it('should not extract non-exported const as exported variable', () => {
+    const code = `
+const internalConfig = {
+  debug: true,
+};
+`;
+    const result = extractFromSource('internal.ts', code);
+
+    // Non-exported const should NOT create a variable node
+    // (only export_statement triggers extractExportedVariables)
+    const varNodes = result.nodes.filter((n) => n.kind === 'variable' && n.name === 'internalConfig');
+    expect(varNodes).toHaveLength(0);
+  });
+
+  it('should extract Zod schema exports', () => {
+    const code = `
+export const userSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  email: z.string().email(),
+});
+`;
+    const result = extractFromSource('schemas.ts', code);
+
+    const varNode = result.nodes.find((n) => n.kind === 'variable' && n.name === 'userSchema');
+    expect(varNode).toBeDefined();
+    expect(varNode?.isExported).toBe(true);
+  });
+
+  it('should extract XState machine exports', () => {
+    const code = `
+export const authMachine = createMachine({
+  id: "auth",
+  initial: "idle",
+  states: {
+    idle: {},
+    authenticated: {},
+  },
+});
+`;
+    const result = extractFromSource('machine.ts', code);
+
+    const varNode = result.nodes.find((n) => n.kind === 'variable' && n.name === 'authMachine');
+    expect(varNode).toBeDefined();
+    expect(varNode?.isExported).toBe(true);
+  });
+});
+
 describe('Python Extraction', () => {
   it('should extract function definitions', () => {
     const code = `

@@ -103,6 +103,8 @@ interface LanguageExtractor {
   structTypes: string[];
   /** Node types that represent enums */
   enumTypes: string[];
+  /** Node types that represent type aliases (e.g. `type X = ...`) */
+  typeAliasTypes: string[];
   /** Node types that represent imports */
   importTypes: string[];
   /** Node types that represent function calls */
@@ -138,6 +140,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     interfaceTypes: ['interface_declaration'],
     structTypes: [],
     enumTypes: ['enum_declaration'],
+    typeAliasTypes: ['type_alias_declaration'],
     importTypes: ['import_statement'],
     callTypes: ['call_expression'],
     nameField: 'name',
@@ -200,6 +203,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     interfaceTypes: [],
     structTypes: [],
     enumTypes: [],
+    typeAliasTypes: [],
     importTypes: ['import_statement'],
     callTypes: ['call_expression'],
     nameField: 'name',
@@ -232,6 +236,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     interfaceTypes: [],
     structTypes: [],
     enumTypes: [],
+    typeAliasTypes: [],
     importTypes: ['import_statement', 'import_from_statement'],
     callTypes: ['call'],
     nameField: 'name',
@@ -269,6 +274,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     interfaceTypes: ['interface_type'],
     structTypes: ['struct_type'],
     enumTypes: [],
+    typeAliasTypes: ['type_spec'], // Go type declarations
     importTypes: ['import_declaration'],
     callTypes: ['call_expression'],
     nameField: 'name',
@@ -293,6 +299,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     interfaceTypes: ['trait_item'],
     structTypes: ['struct_item'],
     enumTypes: ['enum_item'],
+    typeAliasTypes: ['type_item'], // Rust type aliases
     importTypes: ['use_declaration'],
     callTypes: ['call_expression'],
     nameField: 'name',
@@ -333,6 +340,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     interfaceTypes: ['interface_declaration'],
     structTypes: [],
     enumTypes: ['enum_declaration'],
+    typeAliasTypes: [],
     importTypes: ['import_declaration'],
     callTypes: ['method_invocation'],
     nameField: 'name',
@@ -375,6 +383,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     interfaceTypes: [],
     structTypes: ['struct_specifier'],
     enumTypes: ['enum_specifier'],
+    typeAliasTypes: ['type_definition'], // typedef
     importTypes: ['preproc_include'],
     callTypes: ['call_expression'],
     nameField: 'declarator',
@@ -388,6 +397,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     interfaceTypes: [],
     structTypes: ['struct_specifier'],
     enumTypes: ['enum_specifier'],
+    typeAliasTypes: ['type_definition', 'alias_declaration'], // typedef and using
     importTypes: ['preproc_include'],
     callTypes: ['call_expression'],
     nameField: 'declarator',
@@ -417,6 +427,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     interfaceTypes: ['interface_declaration'],
     structTypes: ['struct_declaration'],
     enumTypes: ['enum_declaration'],
+    typeAliasTypes: [],
     importTypes: ['using_directive'],
     callTypes: ['invocation_expression'],
     nameField: 'name',
@@ -461,6 +472,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     interfaceTypes: ['interface_declaration'],
     structTypes: [],
     enumTypes: ['enum_declaration'],
+    typeAliasTypes: [],
     importTypes: ['namespace_use_declaration'],
     callTypes: ['function_call_expression', 'member_call_expression', 'scoped_call_expression'],
     nameField: 'name',
@@ -494,6 +506,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     interfaceTypes: [], // Ruby uses modules
     structTypes: [],
     enumTypes: [],
+    typeAliasTypes: [],
     importTypes: ['call'], // require/require_relative
     callTypes: ['call', 'method_call'],
     nameField: 'name',
@@ -524,6 +537,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     interfaceTypes: ['protocol_declaration'],
     structTypes: ['struct_declaration'],
     enumTypes: ['enum_declaration'],
+    typeAliasTypes: ['typealias_declaration'],
     importTypes: ['import_declaration'],
     callTypes: ['call_expression'],
     nameField: 'name',
@@ -583,6 +597,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     interfaceTypes: ['class_declaration'], // Interfaces use class_declaration with 'interface' modifier
     structTypes: [], // Kotlin uses data classes
     enumTypes: ['class_declaration'], // Enums use class_declaration with 'enum' modifier
+    typeAliasTypes: ['type_alias'],
     importTypes: ['import_header'],
     callTypes: ['call_expression'],
     nameField: 'simple_identifier',
@@ -799,6 +814,16 @@ export class TreeSitterExtractor {
     else if (this.extractor.enumTypes.includes(nodeType)) {
       this.extractEnum(node);
       skipChildren = true; // extractEnum visits body children
+    }
+    // Check for type alias declarations (e.g. `type X = ...` in TypeScript)
+    else if (this.extractor.typeAliasTypes.includes(nodeType)) {
+      this.extractTypeAlias(node);
+    }
+    // Check for export statements containing non-function variable declarations
+    // e.g. `export const X = create(...)`, `export const X = { ... }`
+    else if (nodeType === 'export_statement') {
+      this.extractExportedVariables(node);
+      // Don't skip children — still need to visit inner nodes (functions, calls, etc.)
     }
     // Check for imports
     else if (this.extractor.importTypes.includes(nodeType)) {
@@ -1079,6 +1104,77 @@ export class TreeSitterExtractor {
       visibility,
       isExported,
     });
+  }
+
+  /**
+   * Extract a type alias (e.g. `export type X = ...` in TypeScript)
+   */
+  private extractTypeAlias(node: SyntaxNode): void {
+    if (!this.extractor) return;
+
+    const name = extractName(node, this.source, this.extractor);
+    if (name === '<anonymous>') return;
+    const docstring = getPrecedingDocstring(node, this.source);
+    const isExported = this.extractor.isExported?.(node, this.source);
+
+    this.createNode('type_alias', name, node, {
+      docstring,
+      isExported,
+    });
+  }
+
+  /**
+   * Extract an exported variable declaration that isn't a function.
+   * Handles patterns like:
+   *   export const X = create(...)
+   *   export const X = { ... }
+   *   export const X = [...]
+   *   export const X = "value"
+   *
+   * This is called for `export_statement` nodes that contain a
+   * `lexical_declaration` with `variable_declarator` children whose
+   * values are NOT already handled by functionTypes (arrow_function,
+   * function_expression).
+   */
+  private extractExportedVariables(exportNode: SyntaxNode): void {
+    if (!this.extractor) return;
+
+    // Find the lexical_declaration or variable_declaration child
+    for (let i = 0; i < exportNode.namedChildCount; i++) {
+      const decl = exportNode.namedChild(i);
+      if (!decl || (decl.type !== 'lexical_declaration' && decl.type !== 'variable_declaration')) {
+        continue;
+      }
+
+      // Iterate over each variable_declarator in the declaration
+      for (let j = 0; j < decl.namedChildCount; j++) {
+        const declarator = decl.namedChild(j);
+        if (!declarator || declarator.type !== 'variable_declarator') continue;
+
+        const nameNode = getChildByField(declarator, 'name');
+        if (!nameNode) continue;
+        const name = getNodeText(nameNode, this.source);
+
+        // Skip if the value is a function type — those are already handled
+        // by extractFunction via the functionTypes dispatch
+        const value = getChildByField(declarator, 'value');
+        if (value) {
+          const valueType = value.type;
+          if (
+            this.extractor.functionTypes.includes(valueType)
+          ) {
+            continue; // Already handled by extractFunction
+          }
+        }
+
+        const docstring = getPrecedingDocstring(exportNode, this.source);
+
+        this.createNode('variable', name, declarator, {
+          docstring,
+          isExported: true,
+        });
+      }
+    }
   }
 
   /**
