@@ -166,12 +166,17 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
       }
       return undefined;
     },
-    isExported: (node, source) => {
-      const parent = node.parent;
-      if (parent?.type === 'export_statement') return true;
-      // Check for 'export' keyword before declaration
-      const text = source.substring(Math.max(0, node.startIndex - 10), node.startIndex);
-      return text.includes('export');
+    isExported: (node, _source) => {
+      // Walk the parent chain to find an export_statement ancestor.
+      // This correctly handles deeply nested nodes like arrow functions
+      // inside variable declarations: `export const X = () => { ... }`
+      // where the arrow_function is 3 levels deep under export_statement.
+      let current = node.parent;
+      while (current) {
+        if (current.type === 'export_statement') return true;
+        current = current.parent;
+      }
+      return false;
     },
     isAsync: (node) => {
       for (let i = 0; i < node.childCount; i++) {
@@ -204,11 +209,13 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
       const params = getChildByField(node, 'parameters');
       return params ? getNodeText(params, source) : undefined;
     },
-    isExported: (node, source) => {
-      const parent = node.parent;
-      if (parent?.type === 'export_statement') return true;
-      const text = source.substring(Math.max(0, node.startIndex - 10), node.startIndex);
-      return text.includes('export');
+    isExported: (node, _source) => {
+      let current = node.parent;
+      while (current) {
+        if (current.type === 'export_statement') return true;
+        current = current.parent;
+      }
+      return false;
     },
     isAsync: (node) => {
       for (let i = 0; i < node.childCount; i++) {
@@ -891,7 +898,23 @@ export class TreeSitterExtractor {
   private extractFunction(node: SyntaxNode): void {
     if (!this.extractor) return;
 
-    const name = extractName(node, this.source, this.extractor);
+    let name = extractName(node, this.source, this.extractor);
+    // For arrow functions and function expressions assigned to variables,
+    // resolve the name from the parent variable_declarator.
+    // e.g. `export const useAuth = () => { ... }` — the arrow_function node
+    // has no `name` field; the name lives on the variable_declarator.
+    if (
+      name === '<anonymous>' &&
+      (node.type === 'arrow_function' || node.type === 'function_expression')
+    ) {
+      const parent = node.parent;
+      if (parent?.type === 'variable_declarator') {
+        const varName = getChildByField(parent, 'name');
+        if (varName) {
+          name = getNodeText(varName, this.source);
+        }
+      }
+    }
     if (name === '<anonymous>') return; // Skip anonymous functions
 
     const docstring = getPrecedingDocstring(node, this.source);
