@@ -38,6 +38,9 @@ export class DatabaseConnection {
     // Enable foreign keys and WAL mode for better performance
     db.pragma('foreign_keys = ON');
     db.pragma('journal_mode = WAL');
+    // Wait up to 2 minutes if database is locked by another process
+    // (indexing operations can hold locks for extended periods)
+    db.pragma('busy_timeout = 120000');
 
     // Run schema initialization
     const schemaPath = path.join(__dirname, 'schema.sql');
@@ -60,6 +63,9 @@ export class DatabaseConnection {
     // Enable foreign keys and WAL mode
     db.pragma('foreign_keys = ON');
     db.pragma('journal_mode = WAL');
+    // Wait up to 2 minutes if database is locked by another process
+    // (indexing operations can hold locks for extended periods)
+    db.pragma('busy_timeout = 120000');
 
     // Check and run migrations if needed
     const conn = new DatabaseConnection(db, dbPath);

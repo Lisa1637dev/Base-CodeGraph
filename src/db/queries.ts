@@ -198,28 +198,54 @@ export class QueryBuilder {
       `);
     }
 
-    this.stmts.insertNode.run({
-      id: node.id,
-      kind: node.kind,
-      name: node.name,
-      qualifiedName: node.qualifiedName,
-      filePath: node.filePath,
-      language: node.language,
-      startLine: node.startLine,
-      endLine: node.endLine,
-      startColumn: node.startColumn,
-      endColumn: node.endColumn,
-      docstring: node.docstring ?? null,
-      signature: node.signature ?? null,
-      visibility: node.visibility ?? null,
-      isExported: node.isExported ? 1 : 0,
-      isAsync: node.isAsync ? 1 : 0,
-      isStatic: node.isStatic ? 1 : 0,
-      isAbstract: node.isAbstract ? 1 : 0,
-      decorators: node.decorators ? JSON.stringify(node.decorators) : null,
-      typeParameters: node.typeParameters ? JSON.stringify(node.typeParameters) : null,
-      updatedAt: node.updatedAt,
-    });
+    // Validate required fields to prevent SQLite bind errors
+    if (!node.id || !node.kind || !node.name || !node.filePath || !node.language) {
+      console.error('[CodeGraph] Skipping node with missing required fields:', {
+        id: node.id,
+        kind: node.kind,
+        name: node.name,
+        filePath: node.filePath,
+        language: node.language,
+      });
+      return;
+    }
+
+    try {
+      this.stmts.insertNode.run({
+        id: node.id,
+        kind: node.kind,
+        name: node.name,
+        qualifiedName: node.qualifiedName ?? node.name,
+        filePath: node.filePath,
+        language: node.language,
+        startLine: node.startLine ?? 0,
+        endLine: node.endLine ?? 0,
+        startColumn: node.startColumn ?? 0,
+        endColumn: node.endColumn ?? 0,
+        docstring: node.docstring ?? null,
+        signature: node.signature ?? null,
+        visibility: node.visibility ?? null,
+        isExported: node.isExported ? 1 : 0,
+        isAsync: node.isAsync ? 1 : 0,
+        isStatic: node.isStatic ? 1 : 0,
+        isAbstract: node.isAbstract ? 1 : 0,
+        decorators: node.decorators ? JSON.stringify(node.decorators) : null,
+        typeParameters: node.typeParameters ? JSON.stringify(node.typeParameters) : null,
+        updatedAt: node.updatedAt ?? Date.now(),
+      });
+    } catch (error) {
+      const { captureException } = require('../sentry');
+      captureException(error, {
+        operation: 'insertNode',
+        nodeId: node.id,
+        nodeKind: node.kind,
+        nodeName: node.name,
+        filePath: node.filePath,
+        language: node.language,
+        startLine: node.startLine,
+      });
+      throw error;
+    }
   }
 
   /**
@@ -266,17 +292,23 @@ export class QueryBuilder {
     // Invalidate cache before update
     this.nodeCache.delete(node.id);
 
+    // Validate required fields
+    if (!node.id || !node.kind || !node.name || !node.filePath || !node.language) {
+      console.error('[CodeGraph] Skipping node update with missing required fields:', node.id);
+      return;
+    }
+
     this.stmts.updateNode.run({
       id: node.id,
       kind: node.kind,
       name: node.name,
-      qualifiedName: node.qualifiedName,
+      qualifiedName: node.qualifiedName ?? node.name,
       filePath: node.filePath,
       language: node.language,
-      startLine: node.startLine,
-      endLine: node.endLine,
-      startColumn: node.startColumn,
-      endColumn: node.endColumn,
+      startLine: node.startLine ?? 0,
+      endLine: node.endLine ?? 0,
+      startColumn: node.startColumn ?? 0,
+      endColumn: node.endColumn ?? 0,
       docstring: node.docstring ?? null,
       signature: node.signature ?? null,
       visibility: node.visibility ?? null,
@@ -286,7 +318,7 @@ export class QueryBuilder {
       isAbstract: node.isAbstract ? 1 : 0,
       decorators: node.decorators ? JSON.stringify(node.decorators) : null,
       typeParameters: node.typeParameters ? JSON.stringify(node.typeParameters) : null,
-      updatedAt: node.updatedAt,
+      updatedAt: node.updatedAt ?? Date.now(),
     });
   }
 
@@ -515,6 +547,56 @@ export class QueryBuilder {
 
     sql += ' ORDER BY score DESC, length(name) ASC LIMIT ? OFFSET ?';
     params.push(limit, offset);
+
+    const rows = this.db.prepare(sql).all(...params) as (NodeRow & { score: number })[];
+
+    return rows.map((row) => ({
+      node: rowToNode(row),
+      score: row.score,
+    }));
+  }
+
+  /**
+   * Find nodes by exact name match
+   *
+   * Used for hybrid search - looks up symbols by exact name or case-insensitive match.
+   * Returns high-confidence matches for known symbol names extracted from query.
+   *
+   * @param names - Array of symbol names to look up
+   * @param options - Search options (kinds, languages, limit)
+   * @returns SearchResult array with exact matches scored at 1.0
+   */
+  findNodesByExactName(names: string[], options: SearchOptions = {}): SearchResult[] {
+    if (names.length === 0) return [];
+
+    const { kinds, languages, limit = 50 } = options;
+
+    // Build query with exact matches (case-insensitive)
+    let sql = `
+      SELECT nodes.*,
+        CASE
+          WHEN name COLLATE NOCASE IN (${names.map(() => '?').join(',')}) THEN 1.0
+          ELSE 0.9
+        END as score
+      FROM nodes
+      WHERE name COLLATE NOCASE IN (${names.map(() => '?').join(',')})
+    `;
+
+    // Duplicate names for both SELECT and WHERE clauses
+    const params: (string | number)[] = [...names, ...names];
+
+    if (kinds && kinds.length > 0) {
+      sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
+      params.push(...kinds);
+    }
+
+    if (languages && languages.length > 0) {
+      sql += ` AND language IN (${languages.map(() => '?').join(',')})`;
+      params.push(...languages);
+    }
+
+    sql += ' ORDER BY score DESC, length(name) ASC LIMIT ?';
+    params.push(limit);
 
     const rows = this.db.prepare(sql).all(...params) as (NodeRow & { score: number })[];
 

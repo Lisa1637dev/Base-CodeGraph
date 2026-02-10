@@ -17,6 +17,7 @@ Thumbs.db
 
 # Test coverage
 coverage/
+.nyc_output/
 
 # Environment
 .env
@@ -27,5 +28,18 @@ coverage/
 *.log
 npm-debug.log*
 
+# TypeScript build info
+*.tsbuildinfo
+
+# SQLite WAL mode files
+*.db-wal
+*.db-shm
+
+# Local Claude settings
+.claude/settings.local.json
+
 # CodeGraph data directories (in test projects)
 .codegraph/
+
+# Test language repos for manual testing
+test-languages/

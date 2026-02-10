@@ -9,7 +9,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { homedir } from 'os';
 
-// Global model cache directory (shared across all projects)
+// Global model cache directory - uses codegraph's models directory for shared embedding models
 const GLOBAL_MODELS_DIR = path.join(homedir(), '.codegraph', 'models');
 
 // Dynamic import for @xenova/transformers (ESM-only package)
@@ -40,7 +40,7 @@ export interface EmbedderOptions {
   /** Model ID to use (default: nomic-ai/nomic-embed-text-v1.5) */
   modelId?: string;
 
-  /** Directory to cache the model (default: .codegraph/models) */
+  /** Directory to cache the model (default: ~/.codegraph/models) */
   cacheDir?: string;
 
   /** Whether to show progress during model download */

@@ -68,10 +68,17 @@ src/
 ├── sync/                 # Incremental update system
 │   ├── index.ts
 │   └── git-hooks.ts      # Post-commit hook management
+├── installer/            # Interactive installer
+│   ├── index.ts          # Installer orchestrator
+│   ├── banner.ts         # ASCII art banner
+│   ├── claude-md-template.ts # CLAUDE.md template generator
+│   ├── config-writer.ts  # Configuration file writing
+│   └── prompts.ts        # User prompts
 ├── mcp/                  # Model Context Protocol server
 │   ├── index.ts          # MCPServer class
 │   ├── tools.ts          # MCP tool definitions
 │   └── transport.ts      # Stdio transport
+├── sentry.ts             # Error tracking/reporting
 └── bin/codegraph.ts      # CLI entry point
 ```
 
@@ -99,7 +106,7 @@ SQLite database with:
 
 ### Supported Languages
 
-TypeScript, JavaScript, TSX, JSX, Python, Go, Rust, Java, C, C++, C#, PHP, Ruby, Swift, Kotlin
+TypeScript, JavaScript, TSX, JSX, Python, Go, Rust, Java, C, C++, C#, PHP, Ruby, Swift, Kotlin, Dart, Liquid
 
 ### Node and Edge Types
 

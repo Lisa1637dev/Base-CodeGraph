@@ -7,7 +7,7 @@ CodeGraph is a local-first code intelligence system that builds a semantic knowl
 **Type:** Headless library (no UI components — purely an API)  
 **Runtime:** Node.js (works standalone, in Electron, or any Node environment)  
 **Distribution:** npm package, installable in any project  
-**Per-Project Data:** `.codegraph/` directory in each indexed project  
+**Per-Project Data:** `.codegraph/` directory in each indexed project
 **Core Principle:** Deterministic extraction from AST, not AI-generated summaries
 
 ### Use Cases
@@ -59,7 +59,7 @@ CodeGraph is a local-first code intelligence system that builds a semantic knowl
 │  ┌─────────────────────────────────────────────────────────────┐│
 │  │                   STORAGE LAYER                             ││
 │  │         SQLite + sqlite-vss (per project)                   ││
-│  │              .codegraph/graph.db                            ││
+│  │              .codegraph/graph.db                        ││
 │  └─────────────────────────────────────────────────────────────┘│
 │                          ▲                                      │
 │                          │                                      │
@@ -83,7 +83,7 @@ CodeGraph is a local-first code intelligence system that builds a semantic knowl
 Per-Project Installation (created by codegraph init):
 ┌─────────────────────────────────────────────────────────────────┐
 │  my-laravel-app/                                                │
-│  ├── .codegraph/                                                │
+│  ├── .codegraph/                                           │
 │  │   ├── graph.db            # SQLite database with vectors     │
 │  │   ├── config.json         # Project-specific settings        │
 │  │   └── .gitignore          # Ignore db, keep config           │

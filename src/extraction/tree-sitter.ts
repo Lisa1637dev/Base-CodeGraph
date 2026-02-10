@@ -16,6 +16,7 @@ import {
   UnresolvedReference,
 } from '../types';
 import { getParser, detectLanguage, isLanguageSupported } from './grammars';
+import { captureException } from '../sentry';
 
 /**
  * Generate a unique node ID
@@ -107,6 +108,8 @@ interface LanguageExtractor {
   importTypes: string[];
   /** Node types that represent function calls */
   callTypes: string[];
+  /** Node types that represent variable declarations (const, let, var, etc.) */
+  variableTypes: string[];
   /** Field name for identifier/name */
   nameField: string;
   /** Field name for body */
@@ -125,6 +128,8 @@ interface LanguageExtractor {
   isAsync?: (node: SyntaxNode) => boolean;
   /** Check if node is static */
   isStatic?: (node: SyntaxNode) => boolean;
+  /** Check if variable declaration is a constant (const vs let/var) */
+  isConst?: (node: SyntaxNode) => boolean;
 }
 
 /**
@@ -140,6 +145,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     enumTypes: ['enum_declaration'],
     importTypes: ['import_statement'],
     callTypes: ['call_expression'],
+    variableTypes: ['lexical_declaration', 'variable_declaration'],
     nameField: 'name',
     bodyField: 'body',
     paramsField: 'parameters',
@@ -187,6 +193,17 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
       }
       return false;
     },
+    isConst: (node) => {
+      // For lexical_declaration, check if it's 'const' or 'let'
+      // For variable_declaration, it's always 'var'
+      if (node.type === 'lexical_declaration') {
+        for (let i = 0; i < node.childCount; i++) {
+          const child = node.child(i);
+          if (child?.type === 'const') return true;
+        }
+      }
+      return false;
+    },
   },
   javascript: {
     functionTypes: ['function_declaration', 'arrow_function', 'function_expression'],
@@ -197,6 +214,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     enumTypes: [],
     importTypes: ['import_statement'],
     callTypes: ['call_expression'],
+    variableTypes: ['lexical_declaration', 'variable_declaration'],
     nameField: 'name',
     bodyField: 'body',
     paramsField: 'parameters',
@@ -217,6 +235,15 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
       }
       return false;
     },
+    isConst: (node) => {
+      if (node.type === 'lexical_declaration') {
+        for (let i = 0; i < node.childCount; i++) {
+          const child = node.child(i);
+          if (child?.type === 'const') return true;
+        }
+      }
+      return false;
+    },
   },
   python: {
     functionTypes: ['function_definition'],
@@ -227,6 +254,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     enumTypes: [],
     importTypes: ['import_statement', 'import_from_statement'],
     callTypes: ['call'],
+    variableTypes: ['assignment'], // Python uses assignment for variable declarations
     nameField: 'name',
     bodyField: 'body',
     paramsField: 'parameters',
@@ -264,6 +292,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     enumTypes: [],
     importTypes: ['import_declaration'],
     callTypes: ['call_expression'],
+    variableTypes: ['var_declaration', 'short_var_declaration', 'const_declaration'],
     nameField: 'name',
     bodyField: 'body',
     paramsField: 'parameters',
@@ -288,6 +317,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     enumTypes: ['enum_item'],
     importTypes: ['use_declaration'],
     callTypes: ['call_expression'],
+    variableTypes: ['let_declaration', 'const_item', 'static_item'],
     nameField: 'name',
     bodyField: 'body',
     paramsField: 'parameters',
@@ -328,6 +358,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     enumTypes: ['enum_declaration'],
     importTypes: ['import_declaration'],
     callTypes: ['method_invocation'],
+    variableTypes: ['local_variable_declaration', 'field_declaration'],
     nameField: 'name',
     bodyField: 'body',
     paramsField: 'parameters',
@@ -370,6 +401,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     enumTypes: ['enum_specifier'],
     importTypes: ['preproc_include'],
     callTypes: ['call_expression'],
+    variableTypes: ['declaration'],
     nameField: 'declarator',
     bodyField: 'body',
     paramsField: 'parameters',
@@ -383,6 +415,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     enumTypes: ['enum_specifier'],
     importTypes: ['preproc_include'],
     callTypes: ['call_expression'],
+    variableTypes: ['declaration'],
     nameField: 'declarator',
     bodyField: 'body',
     paramsField: 'parameters',
@@ -412,6 +445,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     enumTypes: ['enum_declaration'],
     importTypes: ['using_directive'],
     callTypes: ['invocation_expression'],
+    variableTypes: ['local_declaration_statement', 'field_declaration'],
     nameField: 'name',
     bodyField: 'body',
     paramsField: 'parameter_list',
@@ -456,6 +490,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     enumTypes: ['enum_declaration'],
     importTypes: ['namespace_use_declaration'],
     callTypes: ['function_call_expression', 'member_call_expression', 'scoped_call_expression'],
+    variableTypes: ['property_declaration', 'const_declaration'],
     nameField: 'name',
     bodyField: 'body',
     paramsField: 'parameters',
@@ -489,6 +524,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     enumTypes: [],
     importTypes: ['call'], // require/require_relative
     callTypes: ['call', 'method_call'],
+    variableTypes: ['assignment'], // Ruby uses assignment like Python
     nameField: 'name',
     bodyField: 'body',
     paramsField: 'parameters',
@@ -519,6 +555,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     enumTypes: ['enum_declaration'],
     importTypes: ['import_declaration'],
     callTypes: ['call_expression'],
+    variableTypes: ['property_declaration', 'constant_declaration'],
     nameField: 'name',
     bodyField: 'body',
     paramsField: 'parameter',
@@ -578,6 +615,7 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
     enumTypes: ['class_declaration'], // Enums use class_declaration with 'enum' modifier
     importTypes: ['import_header'],
     callTypes: ['call_expression'],
+    variableTypes: ['property_declaration'],
     nameField: 'simple_identifier',
     bodyField: 'function_body',
     paramsField: 'function_value_parameters',
@@ -623,6 +661,76 @@ const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = {
       return false;
     },
   },
+  dart: {
+    functionTypes: ['function_signature'],
+    classTypes: ['class_definition'],
+    methodTypes: ['method_signature'],
+    interfaceTypes: [],
+    structTypes: [],
+    enumTypes: ['enum_declaration'],
+    importTypes: ['import_or_export'],
+    callTypes: [],  // Dart calls use identifier+selector, handled via function body traversal
+    variableTypes: [],
+    nameField: 'name',
+    bodyField: 'body', // class_definition uses 'body' field
+    paramsField: 'formal_parameter_list',
+    returnField: 'type',
+    getSignature: (node, source) => {
+      // For function_signature: extract params + return type
+      // For method_signature: delegate to inner function_signature
+      let sig = node;
+      if (node.type === 'method_signature') {
+        const inner = node.namedChildren.find((c: SyntaxNode) =>
+          c.type === 'function_signature' || c.type === 'getter_signature' || c.type === 'setter_signature'
+        );
+        if (inner) sig = inner;
+      }
+      const params = sig.namedChildren.find((c: SyntaxNode) => c.type === 'formal_parameter_list');
+      const retType = sig.namedChildren.find((c: SyntaxNode) =>
+        c.type === 'type_identifier' || c.type === 'void_type'
+      );
+      if (!params && !retType) return undefined;
+      let result = '';
+      if (retType) result += getNodeText(retType, source) + ' ';
+      if (params) result += getNodeText(params, source);
+      return result.trim() || undefined;
+    },
+    getVisibility: (node) => {
+      // Dart convention: _ prefix means private, otherwise public
+      let nameNode: SyntaxNode | null = null;
+      if (node.type === 'method_signature') {
+        const inner = node.namedChildren.find((c: SyntaxNode) =>
+          c.type === 'function_signature' || c.type === 'getter_signature' || c.type === 'setter_signature'
+        );
+        if (inner) nameNode = inner.namedChildren.find((c: SyntaxNode) => c.type === 'identifier') || null;
+      } else {
+        nameNode = node.childForFieldName('name');
+      }
+      if (nameNode && nameNode.text.startsWith('_')) return 'private';
+      return 'public';
+    },
+    isAsync: (node) => {
+      // In Dart, 'async' is on the function_body (next sibling), not the signature
+      const nextSibling = node.nextNamedSibling;
+      if (nextSibling?.type === 'function_body') {
+        for (let i = 0; i < nextSibling.childCount; i++) {
+          const child = nextSibling.child(i);
+          if (child?.type === 'async') return true;
+        }
+      }
+      return false;
+    },
+    isStatic: (node) => {
+      // For method_signature, check for 'static' child
+      if (node.type === 'method_signature') {
+        for (let i = 0; i < node.childCount; i++) {
+          const child = node.child(i);
+          if (child?.type === 'static') return true;
+        }
+      }
+      return false;
+    },
+  },
 };
 
 // TSX and JSX use the same extractors as their base languages
@@ -642,6 +750,28 @@ function extractName(node: SyntaxNode, source: string, extractor: LanguageExtrac
       return innerName ? getNodeText(innerName, source) : getNodeText(nameNode, source);
     }
     return getNodeText(nameNode, source);
+  }
+
+  // For Dart method_signature, look inside inner signature types
+  if (node.type === 'method_signature') {
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i);
+      if (child && (
+        child.type === 'function_signature' ||
+        child.type === 'getter_signature' ||
+        child.type === 'setter_signature' ||
+        child.type === 'constructor_signature' ||
+        child.type === 'factory_constructor_signature'
+      )) {
+        // Find identifier inside the inner signature
+        for (let j = 0; j < child.namedChildCount; j++) {
+          const inner = child.namedChild(j);
+          if (inner?.type === 'identifier') {
+            return getNodeText(inner, source);
+          }
+        }
+      }
+    }
   }
 
   // Fall back to first identifier child
@@ -724,6 +854,7 @@ export class TreeSitterExtractor {
       this.tree = parser.parse(this.source);
       this.visitNode(this.tree.rootNode);
     } catch (error) {
+      captureException(error, { operation: 'tree-sitter-parse', filePath: this.filePath, language: this.language });
       this.errors.push({
         message: `Parse error: ${error instanceof Error ? error.message : String(error)}`,
         severity: 'error',
@@ -773,6 +904,11 @@ export class TreeSitterExtractor {
       }
       skipChildren = true; // extractClass visits body children
     }
+    // Dart-specific: mixin and extension declarations treated as classes
+    else if (this.language === 'dart' && (nodeType === 'mixin_declaration' || nodeType === 'extension_declaration')) {
+      this.extractClass(node);
+      skipChildren = true;
+    }
     // Check for method declarations (only if not already handled by functionTypes)
     else if (this.extractor.methodTypes.includes(nodeType)) {
       this.extractMethod(node);
@@ -792,6 +928,12 @@ export class TreeSitterExtractor {
     else if (this.extractor.enumTypes.includes(nodeType)) {
       this.extractEnum(node);
       skipChildren = true; // extractEnum visits body children
+    }
+    // Check for variable declarations (const, let, var, etc.)
+    // Only extract top-level variables (not inside functions/methods)
+    else if (this.extractor.variableTypes.includes(nodeType) && this.nodeStack.length === 0) {
+      this.extractVariable(node);
+      skipChildren = true; // extractVariable handles children
     }
     // Check for imports
     else if (this.extractor.importTypes.includes(nodeType)) {
@@ -912,7 +1054,10 @@ export class TreeSitterExtractor {
 
     // Push to stack and visit body
     this.nodeStack.push(funcNode.id);
-    const body = getChildByField(node, this.extractor.bodyField);
+    // Dart: function_body is a next sibling of function_signature, not a child
+    const body = this.language === 'dart'
+      ? node.nextNamedSibling?.type === 'function_body' ? node.nextNamedSibling : null
+      : getChildByField(node, this.extractor.bodyField);
     if (body) {
       this.visitFunctionBody(body, funcNode.id);
     }
@@ -941,7 +1086,14 @@ export class TreeSitterExtractor {
 
     // Push to stack and visit body
     this.nodeStack.push(classNode.id);
-    const body = getChildByField(node, this.extractor.bodyField) || node;
+    let body = getChildByField(node, this.extractor.bodyField);
+    // Dart: mixin_declaration uses class_body, extension uses extension_body
+    if (!body && this.language === 'dart') {
+      body = node.namedChildren.find((c: SyntaxNode) =>
+        c.type === 'class_body' || c.type === 'extension_body'
+      ) || null;
+    }
+    if (!body) body = node;
 
     // Visit all children for methods and properties
     for (let i = 0; i < body.namedChildCount; i++) {
@@ -984,7 +1136,10 @@ export class TreeSitterExtractor {
 
     // Push to stack and visit body
     this.nodeStack.push(methodNode.id);
-    const body = getChildByField(node, this.extractor.bodyField);
+    // Dart: function_body is a next sibling of method_signature, not a child
+    const body = this.language === 'dart'
+      ? node.nextNamedSibling?.type === 'function_body' ? node.nextNamedSibling : null
+      : getChildByField(node, this.extractor.bodyField);
     if (body) {
       this.visitFunctionBody(body, methodNode.id);
     }
@@ -1059,36 +1214,483 @@ export class TreeSitterExtractor {
   }
 
   /**
+   * Extract a variable declaration (const, let, var, etc.)
+   *
+   * Extracts top-level and module-level variable declarations.
+   * Captures the variable name and first 100 chars of initializer in signature for searchability.
+   */
+  private extractVariable(node: SyntaxNode): void {
+    if (!this.extractor) return;
+
+    // Different languages have different variable declaration structures
+    // TypeScript/JavaScript: lexical_declaration contains variable_declarator children
+    // Python: assignment has left (identifier) and right (value)
+    // Go: var_declaration, short_var_declaration, const_declaration
+
+    const isConst = this.extractor.isConst?.(node) ?? false;
+    const kind: NodeKind = isConst ? 'constant' : 'variable';
+    const docstring = getPrecedingDocstring(node, this.source);
+    const isExported = this.extractor.isExported?.(node, this.source) ?? false;
+
+    // Extract variable declarators based on language
+    if (this.language === 'typescript' || this.language === 'javascript' ||
+        this.language === 'tsx' || this.language === 'jsx') {
+      // Handle lexical_declaration and variable_declaration
+      // These contain one or more variable_declarator children
+      for (let i = 0; i < node.namedChildCount; i++) {
+        const child = node.namedChild(i);
+        if (child?.type === 'variable_declarator') {
+          const nameNode = getChildByField(child, 'name');
+          const valueNode = getChildByField(child, 'value');
+
+          if (nameNode) {
+            const name = getNodeText(nameNode, this.source);
+            // Skip if it looks like a function (arrow function or function expression)
+            if (valueNode && (valueNode.type === 'arrow_function' || valueNode.type === 'function_expression')) {
+              continue; // Already handled by function extraction
+            }
+
+            // Capture first 100 chars of initializer for context (stored in signature for searchability)
+            const initValue = valueNode ? getNodeText(valueNode, this.source).slice(0, 100) : undefined;
+            const initSignature = initValue ? `= ${initValue}${initValue.length >= 100 ? '...' : ''}` : undefined;
+
+            this.createNode(kind, name, child, {
+              docstring,
+              signature: initSignature,
+              isExported,
+            });
+          }
+        }
+      }
+    } else if (this.language === 'python' || this.language === 'ruby') {
+      // Python/Ruby assignment: left = right
+      const left = getChildByField(node, 'left') || node.namedChild(0);
+      const right = getChildByField(node, 'right') || node.namedChild(1);
+
+      if (left && left.type === 'identifier') {
+        const name = getNodeText(left, this.source);
+        // Skip if name starts with lowercase and looks like a function call result
+        // Python constants are usually UPPER_CASE
+        const initValue = right ? getNodeText(right, this.source).slice(0, 100) : undefined;
+        const initSignature = initValue ? `= ${initValue}${initValue.length >= 100 ? '...' : ''}` : undefined;
+
+        this.createNode(kind, name, node, {
+          docstring,
+          signature: initSignature,
+        });
+      }
+    } else if (this.language === 'go') {
+      // Go: var_declaration, short_var_declaration, const_declaration
+      // These can have multiple identifiers on the left
+      const specs = node.namedChildren.filter(c =>
+        c.type === 'var_spec' || c.type === 'const_spec'
+      );
+
+      for (const spec of specs) {
+        const nameNode = spec.namedChild(0);
+        if (nameNode && nameNode.type === 'identifier') {
+          const name = getNodeText(nameNode, this.source);
+          const valueNode = spec.namedChildCount > 1 ? spec.namedChild(spec.namedChildCount - 1) : null;
+          const initValue = valueNode ? getNodeText(valueNode, this.source).slice(0, 100) : undefined;
+          const initSignature = initValue ? `= ${initValue}${initValue.length >= 100 ? '...' : ''}` : undefined;
+
+          this.createNode(node.type === 'const_declaration' ? 'constant' : 'variable', name, spec, {
+            docstring,
+            signature: initSignature,
+          });
+        }
+      }
+
+      // Handle short_var_declaration (:=)
+      if (node.type === 'short_var_declaration') {
+        const left = getChildByField(node, 'left');
+        const right = getChildByField(node, 'right');
+
+        if (left) {
+          // Can be expression_list with multiple identifiers
+          const identifiers = left.type === 'expression_list'
+            ? left.namedChildren.filter(c => c.type === 'identifier')
+            : [left];
+
+          for (const id of identifiers) {
+            const name = getNodeText(id, this.source);
+            const initValue = right ? getNodeText(right, this.source).slice(0, 100) : undefined;
+            const initSignature = initValue ? `= ${initValue}${initValue.length >= 100 ? '...' : ''}` : undefined;
+
+            this.createNode('variable', name, node, {
+              docstring,
+              signature: initSignature,
+            });
+          }
+        }
+      }
+    } else {
+      // Generic fallback for other languages
+      // Try to find identifier children
+      for (let i = 0; i < node.namedChildCount; i++) {
+        const child = node.namedChild(i);
+        if (child?.type === 'identifier' || child?.type === 'variable_declarator') {
+          const name = child.type === 'identifier'
+            ? getNodeText(child, this.source)
+            : extractName(child, this.source, this.extractor);
+
+          if (name && name !== '<anonymous>') {
+            this.createNode(kind, name, child, {
+              docstring,
+              isExported,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  /**
    * Extract an import
+   *
+   * Creates an import node with the full import statement stored in signature for searchability.
+   * Also creates unresolved references for resolution purposes.
    */
   private extractImport(node: SyntaxNode): void {
-    // Create an edge to track the import
-    // For now, we'll create unresolved references
-    const importText = getNodeText(node, this.source);
+    const importText = getNodeText(node, this.source).trim();
 
     // Extract module/package name based on language
     let moduleName = '';
 
-    if (this.language === 'typescript' || this.language === 'javascript') {
+    if (this.language === 'typescript' || this.language === 'javascript' ||
+        this.language === 'tsx' || this.language === 'jsx') {
       const source = getChildByField(node, 'source');
       if (source) {
         moduleName = getNodeText(source, this.source).replace(/['"]/g, '');
       }
+
+      // Create import node with full statement as signature for searchability
+      if (moduleName) {
+        this.createNode('import', moduleName, node, {
+          signature: importText,
+        });
+      }
     } else if (this.language === 'python') {
-      const module = getChildByField(node, 'module_name') || node.namedChild(0);
-      if (module) {
-        moduleName = getNodeText(module, this.source);
+      // Python has two import forms:
+      // 1. import_statement: import os, sys
+      // 2. import_from_statement: from os import path
+      if (node.type === 'import_from_statement') {
+        const moduleNode = getChildByField(node, 'module_name');
+        if (moduleNode) {
+          moduleName = getNodeText(moduleNode, this.source);
+        }
+      } else {
+        // import_statement - may have multiple modules
+        // Can be dotted_name (import os) or aliased_import (import numpy as np)
+        for (let i = 0; i < node.namedChildCount; i++) {
+          const child = node.namedChild(i);
+          if (child?.type === 'dotted_name') {
+            const name = getNodeText(child, this.source);
+            this.createNode('import', name, node, {
+              signature: importText,
+            });
+          } else if (child?.type === 'aliased_import') {
+            // Extract the module name from inside aliased_import
+            const dottedName = child.namedChildren.find(c => c.type === 'dotted_name');
+            if (dottedName) {
+              const name = getNodeText(dottedName, this.source);
+              this.createNode('import', name, node, {
+                signature: importText,
+              });
+            }
+          }
+        }
+        // Skip creating another node below if we handled import_statement
+        if (node.type === 'import_statement') {
+          return;
+        }
+      }
+
+      if (moduleName) {
+        this.createNode('import', moduleName, node, {
+          signature: importText,
+        });
       }
     } else if (this.language === 'go') {
-      const path = node.namedChild(0);
-      if (path) {
-        moduleName = getNodeText(path, this.source).replace(/['"]/g, '');
+      // Go imports can be single or grouped
+      // Single: import "fmt" - uses import_spec directly as child
+      // Grouped: import ( "fmt" \n "os" ) - uses import_spec_list containing import_spec children
+
+      // Helper function to extract path from import_spec
+      const extractFromSpec = (spec: SyntaxNode): void => {
+        const stringLiteral = spec.namedChildren.find(c => c.type === 'interpreted_string_literal');
+        if (stringLiteral) {
+          const path = getNodeText(stringLiteral, this.source).replace(/['"]/g, '');
+          if (path) {
+            this.createNode('import', path, spec, {
+              signature: getNodeText(spec, this.source).trim(),
+            });
+          }
+        }
+      };
+
+      // Find import_spec_list for grouped imports
+      const importSpecList = node.namedChildren.find(c => c.type === 'import_spec_list');
+
+      if (importSpecList) {
+        // Grouped imports - iterate through import_spec children
+        const importSpecs = importSpecList.namedChildren.filter(c => c.type === 'import_spec');
+        for (const spec of importSpecs) {
+          extractFromSpec(spec);
+        }
+      } else {
+        // Single import: import "fmt" - import_spec is direct child
+        const importSpec = node.namedChildren.find(c => c.type === 'import_spec');
+        if (importSpec) {
+          extractFromSpec(importSpec);
+        }
       }
+      return; // Go handled completely above
+    } else if (this.language === 'rust') {
+      // Rust use declarations
+      // use std::{ffi::OsStr, io}; -> scoped_use_list with identifier "std"
+      // use crate::error::Error;  -> scoped_identifier starting with "crate"
+      // use super::utils;         -> scoped_identifier starting with "super"
+
+      // Helper to get the root crate/module from a scoped path
+      const getRootModule = (scopedNode: SyntaxNode): string => {
+        // Recursively find the leftmost identifier/crate/super/self
+        const firstChild = scopedNode.namedChild(0);
+        if (!firstChild) return getNodeText(scopedNode, this.source);
+
+        if (firstChild.type === 'identifier' ||
+            firstChild.type === 'crate' ||
+            firstChild.type === 'super' ||
+            firstChild.type === 'self') {
+          return getNodeText(firstChild, this.source);
+        } else if (firstChild.type === 'scoped_identifier') {
+          return getRootModule(firstChild);
+        }
+        return getNodeText(firstChild, this.source);
+      };
+
+      // Find the use argument (scoped_use_list or scoped_identifier)
+      const useArg = node.namedChildren.find(c =>
+        c.type === 'scoped_use_list' ||
+        c.type === 'scoped_identifier' ||
+        c.type === 'use_list' ||
+        c.type === 'identifier'
+      );
+
+      if (useArg) {
+        moduleName = getRootModule(useArg);
+        this.createNode('import', moduleName, node, {
+          signature: importText,
+        });
+      }
+      return; // Rust handled completely above
+    } else if (this.language === 'swift') {
+      // Swift imports: import Foundation, @testable import Alamofire
+      // AST structure: import_declaration -> identifier -> simple_identifier
+      const identifier = node.namedChildren.find(c => c.type === 'identifier');
+      if (identifier) {
+        moduleName = getNodeText(identifier, this.source);
+        this.createNode('import', moduleName, node, {
+          signature: importText,
+        });
+      }
+      return; // Swift handled completely above
+    } else if (this.language === 'kotlin') {
+      // Kotlin imports: import java.io.IOException, import x.y.Z as Alias, import x.y.*
+      // AST structure: import_header -> identifier (dotted path)
+      const identifier = node.namedChildren.find(c => c.type === 'identifier');
+      if (identifier) {
+        moduleName = getNodeText(identifier, this.source);
+        this.createNode('import', moduleName, node, {
+          signature: importText,
+        });
+      }
+      return; // Kotlin handled completely above
+    } else if (this.language === 'java') {
+      // Java imports: import java.util.List, import static x.Y.method, import x.y.*
+      // AST structure: import_declaration -> scoped_identifier (dotted path)
+      const scopedId = node.namedChildren.find(c => c.type === 'scoped_identifier');
+      if (scopedId) {
+        moduleName = getNodeText(scopedId, this.source);
+        this.createNode('import', moduleName, node, {
+          signature: importText,
+        });
+      }
+      return; // Java handled completely above
+    } else if (this.language === 'csharp') {
+      // C# using directives: using System, using System.Collections.Generic, using static X, using Alias = X
+      // AST structure: using_directive -> qualified_name (dotted) or identifier (simple)
+      // For alias imports: identifier = qualified_name - we want the qualified_name
+      const qualifiedName = node.namedChildren.find(c => c.type === 'qualified_name');
+      if (qualifiedName) {
+        moduleName = getNodeText(qualifiedName, this.source);
+      } else {
+        // Simple namespace like "using System;" - get the first identifier
+        const identifier = node.namedChildren.find(c => c.type === 'identifier');
+        if (identifier) {
+          moduleName = getNodeText(identifier, this.source);
+        }
+      }
+      if (moduleName) {
+        this.createNode('import', moduleName, node, {
+          signature: importText,
+        });
+      }
+      return; // C# handled completely above
+    } else if (this.language === 'php') {
+      // PHP use declarations: use X\Y\Z, use X as Y, use function X\func, use X\{A, B}
+      // AST structure: namespace_use_declaration -> namespace_use_clause -> qualified_name or name
+
+      // Check for grouped imports first: use X\{A, B}
+      const namespacePrefix = node.namedChildren.find(c => c.type === 'namespace_name');
+      const useGroup = node.namedChildren.find(c => c.type === 'namespace_use_group');
+
+      if (namespacePrefix && useGroup) {
+        // Grouped import - create one import per item
+        const prefix = getNodeText(namespacePrefix, this.source);
+        const useClauses = useGroup.namedChildren.filter((c: SyntaxNode) => c.type === 'namespace_use_clause');
+        for (const clause of useClauses) {
+          const name = clause.namedChildren.find((c: SyntaxNode) => c.type === 'name');
+          if (name) {
+            const fullPath = `${prefix}\\${getNodeText(name, this.source)}`;
+            this.createNode('import', fullPath, node, {
+              signature: importText,
+            });
+          }
+        }
+        return;
+      }
+
+      // Single import - find namespace_use_clause
+      const useClause = node.namedChildren.find(c => c.type === 'namespace_use_clause');
+      if (useClause) {
+        // Look for qualified_name (full path) or name (simple)
+        const qualifiedName = useClause.namedChildren.find((c: SyntaxNode) => c.type === 'qualified_name');
+        if (qualifiedName) {
+          moduleName = getNodeText(qualifiedName, this.source);
+        } else {
+          const name = useClause.namedChildren.find((c: SyntaxNode) => c.type === 'name');
+          if (name) {
+            moduleName = getNodeText(name, this.source);
+          }
+        }
+      }
+
+      if (moduleName) {
+        this.createNode('import', moduleName, node, {
+          signature: importText,
+        });
+      }
+      return; // PHP handled completely above
+    } else if (this.language === 'ruby') {
+      // Ruby imports: require 'json', require_relative '../helper'
+      // AST structure: call -> identifier (require/require_relative) + argument_list -> string -> string_content
+
+      // Check if this is a require/require_relative call
+      const identifier = node.namedChildren.find(c => c.type === 'identifier');
+      if (!identifier) return;
+      const methodName = getNodeText(identifier, this.source);
+      if (methodName !== 'require' && methodName !== 'require_relative') {
+        return; // Not an import, skip
+      }
+
+      // Find the argument (string)
+      const argList = node.namedChildren.find(c => c.type === 'argument_list');
+      if (argList) {
+        const stringNode = argList.namedChildren.find((c: SyntaxNode) => c.type === 'string');
+        if (stringNode) {
+          // Get string_content (without quotes)
+          const stringContent = stringNode.namedChildren.find((c: SyntaxNode) => c.type === 'string_content');
+          if (stringContent) {
+            moduleName = getNodeText(stringContent, this.source);
+          }
+        }
+      }
+
+      if (moduleName) {
+        this.createNode('import', moduleName, node, {
+          signature: importText,
+        });
+      }
+      return; // Ruby handled completely above
+    } else if (this.language === 'dart') {
+      // Dart imports: import 'dart:async'; import 'package:foo/bar.dart' as bar;
+      // AST: import_or_export -> library_import -> import_specification -> configurable_uri -> uri -> string_literal
+      const libraryImport = node.namedChildren.find(c => c.type === 'library_import');
+      if (libraryImport) {
+        const importSpec = libraryImport.namedChildren.find((c: SyntaxNode) => c.type === 'import_specification');
+        if (importSpec) {
+          const configurableUri = importSpec.namedChildren.find((c: SyntaxNode) => c.type === 'configurable_uri');
+          if (configurableUri) {
+            const uri = configurableUri.namedChildren.find((c: SyntaxNode) => c.type === 'uri');
+            if (uri) {
+              const stringLiteral = uri.namedChildren.find((c: SyntaxNode) => c.type === 'string_literal');
+              if (stringLiteral) {
+                moduleName = getNodeText(stringLiteral, this.source).replace(/['"]/g, '');
+              }
+            }
+          }
+        }
+      }
+      // Also handle exports: export 'src/foo.dart';
+      const libraryExport = node.namedChildren.find(c => c.type === 'library_export');
+      if (libraryExport) {
+        const configurableUri = libraryExport.namedChildren.find((c: SyntaxNode) => c.type === 'configurable_uri');
+        if (configurableUri) {
+          const uri = configurableUri.namedChildren.find((c: SyntaxNode) => c.type === 'uri');
+          if (uri) {
+            const stringLiteral = uri.namedChildren.find((c: SyntaxNode) => c.type === 'string_literal');
+            if (stringLiteral) {
+              moduleName = getNodeText(stringLiteral, this.source).replace(/['"]/g, '');
+            }
+          }
+        }
+      }
+
+      if (moduleName) {
+        this.createNode('import', moduleName, node, {
+          signature: importText,
+        });
+      }
+      return; // Dart handled completely above
+    } else if (this.language === 'c' || this.language === 'cpp') {
+      // C/C++ includes: #include <iostream>, #include "myheader.h"
+      // AST: preproc_include -> system_lib_string (<...>) or string_literal ("...")
+
+      // Check for system include: <path>
+      const systemLib = node.namedChildren.find(c => c.type === 'system_lib_string');
+      if (systemLib) {
+        // Remove angle brackets: <iostream> -> iostream
+        moduleName = getNodeText(systemLib, this.source).replace(/^<|>$/g, '');
+      } else {
+        // Check for local include: "path"
+        const stringLiteral = node.namedChildren.find(c => c.type === 'string_literal');
+        if (stringLiteral) {
+          const stringContent = stringLiteral.namedChildren.find((c: SyntaxNode) => c.type === 'string_content');
+          if (stringContent) {
+            moduleName = getNodeText(stringContent, this.source);
+          }
+        }
+      }
+
+      if (moduleName) {
+        this.createNode('import', moduleName, node, {
+          signature: importText,
+        });
+      }
+      return; // C/C++ handled completely above
     } else {
-      // Generic extraction
+      // Generic extraction for other languages
       moduleName = importText;
+      if (moduleName) {
+        this.createNode('import', moduleName, node, {
+          signature: importText,
+        });
+      }
     }
 
+    // Keep unresolved reference creation for resolution purposes
+    // This is used to resolve imports to their target files/modules
     if (moduleName && this.nodeStack.length > 0) {
       const parentId = this.nodeStack[this.nodeStack.length - 1];
       if (parentId) {
@@ -1195,7 +1797,8 @@ export class TreeSitterExtractor {
 
       if (
         child.type === 'implements_clause' ||
-        child.type === 'class_interface_clause'
+        child.type === 'class_interface_clause' ||
+        child.type === 'interfaces' // Dart
       ) {
         // Extract implemented interfaces
         for (let j = 0; j < child.namedChildCount; j++) {
@@ -1260,6 +1863,7 @@ export class LiquidExtractor {
       // Extract assign statements as variables
       this.extractAssignments(fileNode.id);
     } catch (error) {
+      captureException(error, { operation: 'liquid-extraction', filePath: this.filePath });
       this.errors.push({
         message: `Liquid extraction error: ${error instanceof Error ? error.message : String(error)}`,
         severity: 'error',
@@ -1309,8 +1913,33 @@ export class LiquidExtractor {
     let match;
 
     while ((match = renderRegex.exec(this.source)) !== null) {
-      const [, tagType, snippetName] = match;
+      const [fullMatch, tagType, snippetName] = match;
       const line = this.getLineNumber(match.index);
+
+      // Create an import node for searchability
+      const importNodeId = generateNodeId(this.filePath, 'import', snippetName!, line);
+      const importNode: Node = {
+        id: importNodeId,
+        kind: 'import',
+        name: snippetName!,
+        qualifiedName: `${this.filePath}::import:${snippetName}`,
+        filePath: this.filePath,
+        language: 'liquid',
+        signature: fullMatch,
+        startLine: line,
+        endLine: line,
+        startColumn: match.index - this.getLineStart(line),
+        endColumn: match.index - this.getLineStart(line) + fullMatch.length,
+        updatedAt: Date.now(),
+      };
+      this.nodes.push(importNode);
+
+      // Add containment edge from file to import
+      this.edges.push({
+        source: fileNodeId,
+        target: importNodeId,
+        kind: 'contains',
+      });
 
       // Create a component node for the snippet reference
       const nodeId = generateNodeId(this.filePath, 'component', `${tagType}:${snippetName}`, line);
@@ -1325,7 +1954,7 @@ export class LiquidExtractor {
         startLine: line,
         endLine: line,
         startColumn: match.index - this.getLineStart(line),
-        endColumn: match.index - this.getLineStart(line) + match[0].length,
+        endColumn: match.index - this.getLineStart(line) + fullMatch.length,
         updatedAt: Date.now(),
       };
 
@@ -1358,8 +1987,33 @@ export class LiquidExtractor {
     let match;
 
     while ((match = sectionRegex.exec(this.source)) !== null) {
-      const [, sectionName] = match;
+      const [fullMatch, sectionName] = match;
       const line = this.getLineNumber(match.index);
+
+      // Create an import node for searchability
+      const importNodeId = generateNodeId(this.filePath, 'import', sectionName!, line);
+      const importNode: Node = {
+        id: importNodeId,
+        kind: 'import',
+        name: sectionName!,
+        qualifiedName: `${this.filePath}::import:${sectionName}`,
+        filePath: this.filePath,
+        language: 'liquid',
+        signature: fullMatch,
+        startLine: line,
+        endLine: line,
+        startColumn: match.index - this.getLineStart(line),
+        endColumn: match.index - this.getLineStart(line) + fullMatch.length,
+        updatedAt: Date.now(),
+      };
+      this.nodes.push(importNode);
+
+      // Add containment edge from file to import
+      this.edges.push({
+        source: fileNodeId,
+        target: importNodeId,
+        kind: 'contains',
+      });
 
       // Create a component node for the section reference
       const nodeId = generateNodeId(this.filePath, 'component', `section:${sectionName}`, line);
@@ -1374,7 +2028,7 @@ export class LiquidExtractor {
         startLine: line,
         endLine: line,
         startColumn: match.index - this.getLineStart(line),
-        endColumn: match.index - this.getLineStart(line) + match[0].length,
+        endColumn: match.index - this.getLineStart(line) + fullMatch.length,
         updatedAt: Date.now(),
       };
 

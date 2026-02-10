@@ -12,9 +12,11 @@
  *   codegraph sync [path]        Sync changes since last index
  *   codegraph status [path]      Show index status
  *   codegraph query <search>     Search for symbols
+ *   codegraph files [options]    Show project file structure
  *   codegraph context <task>     Build context for a task
- *   codegraph hooks install      Install git hooks
- *   codegraph hooks remove       Remove git hooks
+ *
+ * Note: Git hooks have been removed. CodeGraph sync is triggered automatically
+ * through codegraph's Claude Code hooks integration.
  */
 
 import { Command } from 'commander';
@@ -23,10 +25,20 @@ import * as fs from 'fs';
 import CodeGraph from '../index';
 import type { IndexProgress } from '../index';
 import { runInstaller } from '../installer';
+import { initSentry, captureException } from '../sentry';
 
 // Check if running with no arguments - run installer
+// Read version for Sentry release tag
+const pkgVersion = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf-8')).version;
+  } catch { return undefined; }
+})();
+initSentry({ processName: 'codegraph-cli', version: pkgVersion });
+
 if (process.argv.length === 2) {
   runInstaller().catch((err) => {
+    captureException(err);
     console.error('Installation failed:', err.message);
     process.exit(1);
   });
@@ -34,6 +46,16 @@ if (process.argv.length === 2) {
   // Normal CLI flow
   main();
 }
+
+process.on('uncaughtException', (error) => {
+  captureException(error);
+  console.error('[CodeGraph] Uncaught exception:', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  captureException(reason);
+  console.error('[CodeGraph] Unhandled rejection:', reason);
+});
 
 function main() {
 
@@ -84,9 +106,34 @@ program
 
 /**
  * Resolve project path from argument or current directory
+ * Walks up parent directories to find nearest initialized CodeGraph project
+ * (must have .codegraph/codegraph.db, not just .codegraph/lessons.db)
  */
 function resolveProjectPath(pathArg?: string): string {
-  return path.resolve(pathArg || process.cwd());
+  const absolutePath = path.resolve(pathArg || process.cwd());
+
+  // If exact path is initialized (has codegraph.db), use it
+  if (CodeGraph.isInitialized(absolutePath)) {
+    return absolutePath;
+  }
+
+  // Walk up to find nearest parent with CodeGraph initialized
+  // Note: findNearestCodeGraphRoot finds any .codegraph folder, but we need one with codegraph.db
+  let current = absolutePath;
+  const root = path.parse(current).root;
+
+  while (current !== root) {
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+
+    if (CodeGraph.isInitialized(current)) {
+      return current;
+    }
+  }
+
+  // Not found - return original path (will fail later with helpful error)
+  return absolutePath;
 }
 
 /**
@@ -182,8 +229,7 @@ program
   .command('init [path]')
   .description('Initialize CodeGraph in a project directory')
   .option('-i, --index', 'Run initial indexing after initialization')
-  .option('--no-hooks', 'Skip git hooks installation')
-  .action(async (pathArg: string | undefined, options: { index?: boolean; hooks?: boolean }) => {
+  .action(async (pathArg: string | undefined, options: { index?: boolean }) => {
     const projectPath = resolveProjectPath(pathArg);
 
     console.log(chalk.bold('\nInitializing CodeGraph...\n'));
@@ -203,16 +249,6 @@ program
 
       success(`Initialized CodeGraph in ${projectPath}`);
       info(`Created .codegraph/ directory`);
-
-      // Install git hooks if requested (default: true)
-      if (options.hooks !== false && cg.isGitRepository()) {
-        const hookResult = cg.installGitHooks();
-        if (hookResult.success) {
-          success('Installed git post-commit hook for auto-sync');
-        } else {
-          warn(`Could not install git hooks: ${hookResult.message}`);
-        }
-      }
 
       // Run initial index if requested
       if (options.index) {
@@ -238,6 +274,7 @@ program
 
       cg.destroy();
     } catch (err) {
+      captureException(err);
       error(`Failed to initialize: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
@@ -305,6 +342,7 @@ program
 
       cg.destroy();
     } catch (err) {
+      captureException(err);
       error(`Failed to index: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
@@ -361,6 +399,7 @@ program
 
       cg.destroy();
     } catch (err) {
+      captureException(err);
       if (!options.quiet) {
         error(`Failed to sync: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -374,11 +413,16 @@ program
 program
   .command('status [path]')
   .description('Show index status and statistics')
-  .action(async (pathArg: string | undefined) => {
+  .option('-j, --json', 'Output as JSON')
+  .action(async (pathArg: string | undefined, options: { json?: boolean }) => {
     const projectPath = resolveProjectPath(pathArg);
 
     try {
       if (!CodeGraph.isInitialized(projectPath)) {
+        if (options.json) {
+          console.log(JSON.stringify({ initialized: false, projectPath }));
+          return;
+        }
         console.log(chalk.bold('\nCodeGraph Status\n'));
         info(`Project: ${projectPath}`);
         warn('Not initialized');
@@ -389,6 +433,27 @@ program
       const cg = await CodeGraph.open(projectPath);
       const stats = cg.getStats();
       const changes = cg.getChangedFiles();
+
+      // JSON output mode
+      if (options.json) {
+        console.log(JSON.stringify({
+          initialized: true,
+          projectPath,
+          fileCount: stats.fileCount,
+          nodeCount: stats.nodeCount,
+          edgeCount: stats.edgeCount,
+          dbSizeBytes: stats.dbSizeBytes,
+          nodesByKind: stats.nodesByKind,
+          languages: Object.entries(stats.filesByLanguage).filter(([, count]) => count > 0).map(([lang]) => lang),
+          pendingChanges: {
+            added: changes.added.length,
+            modified: changes.modified.length,
+            removed: changes.removed.length,
+          },
+        }));
+        cg.destroy();
+        return;
+      }
 
       console.log(chalk.bold('\nCodeGraph Status\n'));
 
@@ -443,19 +508,9 @@ program
       }
       console.log();
 
-      // Git hooks status
-      if (cg.isGitRepository()) {
-        const hookInstalled = cg.isGitHookInstalled();
-        if (hookInstalled) {
-          success('Git hooks: installed');
-        } else {
-          warn('Git hooks: not installed');
-          info('Run "codegraph hooks install" to enable auto-sync');
-        }
-      }
-
       cg.destroy();
     } catch (err) {
+      captureException(err);
       error(`Failed to get status: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
@@ -517,10 +572,217 @@ program
 
       cg.destroy();
     } catch (err) {
+      captureException(err);
       error(`Search failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
   });
+
+/**
+ * codegraph files [path]
+ */
+program
+  .command('files')
+  .description('Show project file structure from the index')
+  .option('-p, --path <path>', 'Project path')
+  .option('--filter <dir>', 'Filter to files under this directory')
+  .option('--pattern <glob>', 'Filter files matching this glob pattern')
+  .option('--format <format>', 'Output format (tree, flat, grouped)', 'tree')
+  .option('--max-depth <number>', 'Maximum directory depth for tree format')
+  .option('--no-metadata', 'Hide file metadata (language, symbol count)')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (options: {
+    path?: string;
+    filter?: string;
+    pattern?: string;
+    format?: string;
+    maxDepth?: string;
+    metadata?: boolean;
+    json?: boolean;
+  }) => {
+    const projectPath = resolveProjectPath(options.path);
+
+    try {
+      if (!CodeGraph.isInitialized(projectPath)) {
+        error(`CodeGraph not initialized in ${projectPath}`);
+        process.exit(1);
+      }
+
+      const cg = await CodeGraph.open(projectPath);
+      let files = cg.getFiles();
+
+      if (files.length === 0) {
+        info('No files indexed. Run "codegraph index" first.');
+        cg.destroy();
+        return;
+      }
+
+      // Filter by path prefix
+      if (options.filter) {
+        const filter = options.filter;
+        files = files.filter(f => f.path.startsWith(filter) || f.path.startsWith('./' + filter));
+      }
+
+      // Filter by glob pattern
+      if (options.pattern) {
+        const regex = globToRegex(options.pattern);
+        files = files.filter(f => regex.test(f.path));
+      }
+
+      if (files.length === 0) {
+        info('No files found matching the criteria.');
+        cg.destroy();
+        return;
+      }
+
+      // JSON output
+      if (options.json) {
+        const output = files.map(f => ({
+          path: f.path,
+          language: f.language,
+          nodeCount: f.nodeCount,
+          size: f.size,
+        }));
+        console.log(JSON.stringify(output, null, 2));
+        cg.destroy();
+        return;
+      }
+
+      const includeMetadata = options.metadata !== false;
+      const format = options.format || 'tree';
+      const maxDepth = options.maxDepth ? parseInt(options.maxDepth, 10) : undefined;
+
+      // Format output
+      switch (format) {
+        case 'flat':
+          console.log(chalk.bold(`\nFiles (${files.length}):\n`));
+          for (const file of files.sort((a, b) => a.path.localeCompare(b.path))) {
+            if (includeMetadata) {
+              console.log(`  ${file.path} ${chalk.dim(`(${file.language}, ${file.nodeCount} symbols)`)}`);
+            } else {
+              console.log(`  ${file.path}`);
+            }
+          }
+          break;
+
+        case 'grouped':
+          console.log(chalk.bold(`\nFiles by Language (${files.length} total):\n`));
+          const byLang = new Map<string, typeof files>();
+          for (const file of files) {
+            const existing = byLang.get(file.language) || [];
+            existing.push(file);
+            byLang.set(file.language, existing);
+          }
+          const sortedLangs = [...byLang.entries()].sort((a, b) => b[1].length - a[1].length);
+          for (const [lang, langFiles] of sortedLangs) {
+            console.log(chalk.cyan(`${lang} (${langFiles.length}):`));
+            for (const file of langFiles.sort((a, b) => a.path.localeCompare(b.path))) {
+              if (includeMetadata) {
+                console.log(`  ${file.path} ${chalk.dim(`(${file.nodeCount} symbols)`)}`);
+              } else {
+                console.log(`  ${file.path}`);
+              }
+            }
+            console.log();
+          }
+          break;
+
+        case 'tree':
+        default:
+          console.log(chalk.bold(`\nProject Structure (${files.length} files):\n`));
+          printFileTree(files, includeMetadata, maxDepth, chalk);
+          break;
+      }
+
+      console.log();
+      cg.destroy();
+    } catch (err) {
+      captureException(err);
+      error(`Failed to list files: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+/**
+ * Convert glob pattern to regex
+ */
+function globToRegex(pattern: string): RegExp {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '{{GLOBSTAR}}')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]')
+    .replace(/\{\{GLOBSTAR\}\}/g, '.*');
+  return new RegExp(escaped);
+}
+
+/**
+ * Print files as a tree
+ */
+function printFileTree(
+  files: { path: string; language: string; nodeCount: number }[],
+  includeMetadata: boolean,
+  maxDepth: number | undefined,
+  chalk: { dim: (s: string) => string; cyan: (s: string) => string }
+): void {
+  interface TreeNode {
+    name: string;
+    children: Map<string, TreeNode>;
+    file?: { language: string; nodeCount: number };
+  }
+
+  const root: TreeNode = { name: '', children: new Map() };
+
+  for (const file of files) {
+    const parts = file.path.split('/');
+    let current = root;
+
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (!part) continue;
+
+      if (!current.children.has(part)) {
+        current.children.set(part, { name: part, children: new Map() });
+      }
+      current = current.children.get(part)!;
+
+      if (i === parts.length - 1) {
+        current.file = { language: file.language, nodeCount: file.nodeCount };
+      }
+    }
+  }
+
+  const renderNode = (node: TreeNode, prefix: string, isLast: boolean, depth: number): void => {
+    if (maxDepth !== undefined && depth > maxDepth) return;
+
+    const connector = isLast ? '└── ' : '├── ';
+    const childPrefix = isLast ? '    ' : '│   ';
+
+    if (node.name) {
+      let line = prefix + connector + node.name;
+      if (node.file && includeMetadata) {
+        line += chalk.dim(` (${node.file.language}, ${node.file.nodeCount} symbols)`);
+      }
+      console.log(line);
+    }
+
+    const children = [...node.children.values()];
+    children.sort((a, b) => {
+      const aIsDir = a.children.size > 0 && !a.file;
+      const bIsDir = b.children.size > 0 && !b.file;
+      if (aIsDir !== bIsDir) return aIsDir ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i]!;
+      const nextPrefix = node.name ? prefix + childPrefix : prefix;
+      renderNode(child, nextPrefix, i === children.length - 1, depth + 1);
+    }
+  };
+
+  renderNode(root, '', true, 0);
+}
 
 /**
  * codegraph context <task>
@@ -562,129 +824,8 @@ program
 
       cg.destroy();
     } catch (err) {
+      captureException(err);
       error(`Failed to build context: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    }
-  });
-
-/**
- * codegraph hooks <action>
- */
-const hooksCommand = program
-  .command('hooks')
-  .description('Manage git hooks');
-
-hooksCommand
-  .command('install')
-  .description('Install git post-commit hook for auto-sync')
-  .option('-p, --path <path>', 'Project path')
-  .action(async (options: { path?: string }) => {
-    const projectPath = resolveProjectPath(options.path);
-
-    try {
-      if (!CodeGraph.isInitialized(projectPath)) {
-        error(`CodeGraph not initialized in ${projectPath}`);
-        process.exit(1);
-      }
-
-      const cg = await CodeGraph.open(projectPath);
-
-      if (!cg.isGitRepository()) {
-        error('Not a git repository');
-        cg.destroy();
-        process.exit(1);
-      }
-
-      const result = cg.installGitHooks();
-
-      if (result.success) {
-        success(result.message);
-        if (result.previousHookBackedUp) {
-          info('Previous hook backed up to post-commit.codegraph-backup');
-        }
-      } else {
-        error(result.message);
-        process.exit(1);
-      }
-
-      cg.destroy();
-    } catch (err) {
-      error(`Failed to install hooks: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    }
-  });
-
-hooksCommand
-  .command('remove')
-  .description('Remove git post-commit hook')
-  .option('-p, --path <path>', 'Project path')
-  .action(async (options: { path?: string }) => {
-    const projectPath = resolveProjectPath(options.path);
-
-    try {
-      if (!CodeGraph.isInitialized(projectPath)) {
-        error(`CodeGraph not initialized in ${projectPath}`);
-        process.exit(1);
-      }
-
-      const cg = await CodeGraph.open(projectPath);
-
-      if (!cg.isGitRepository()) {
-        error('Not a git repository');
-        cg.destroy();
-        process.exit(1);
-      }
-
-      const result = cg.removeGitHooks();
-
-      if (result.success) {
-        success(result.message);
-        if (result.restoredFromBackup) {
-          info('Restored previous hook from backup');
-        }
-      } else {
-        error(result.message);
-        process.exit(1);
-      }
-
-      cg.destroy();
-    } catch (err) {
-      error(`Failed to remove hooks: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    }
-  });
-
-hooksCommand
-  .command('status')
-  .description('Check git hooks status')
-  .option('-p, --path <path>', 'Project path')
-  .action(async (options: { path?: string }) => {
-    const projectPath = resolveProjectPath(options.path);
-
-    try {
-      if (!CodeGraph.isInitialized(projectPath)) {
-        error(`CodeGraph not initialized in ${projectPath}`);
-        process.exit(1);
-      }
-
-      const cg = await CodeGraph.open(projectPath);
-
-      if (!cg.isGitRepository()) {
-        info('Not a git repository');
-        cg.destroy();
-        return;
-      }
-
-      if (cg.isGitHookInstalled()) {
-        success('Git hook is installed');
-      } else {
-        warn('Git hook is not installed');
-        info('Run "codegraph hooks install" to enable auto-sync');
-      }
-
-      cg.destroy();
-    } catch (err) {
-      error(`Failed to check hooks: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
   });
@@ -729,9 +870,11 @@ program
         console.log(chalk.cyan('  codegraph_callees') + '   - Find what a symbol calls');
         console.log(chalk.cyan('  codegraph_impact') + '    - Analyze impact of changes');
         console.log(chalk.cyan('  codegraph_node') + '      - Get symbol details');
+        console.log(chalk.cyan('  codegraph_files') + '     - Get project file structure');
         console.log(chalk.cyan('  codegraph_status') + '    - Get index status');
       }
     } catch (err) {
+      captureException(err);
       error(`Failed to start server: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }

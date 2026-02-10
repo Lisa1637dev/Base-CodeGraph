@@ -4,8 +4,26 @@
  * Defines the tools exposed by the CodeGraph MCP server.
  */
 
-import CodeGraph from '../index';
+import CodeGraph, { findNearestCodeGraphRoot } from '../index';
 import type { Node, SearchResult, Subgraph, TaskContext, NodeKind } from '../types';
+import { createHash } from 'crypto';
+import { writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+
+/**
+ * Mark a Claude session as having consulted MCP tools.
+ * This enables Grep/Glob/Bash commands that would otherwise be blocked.
+ */
+function markSessionConsulted(sessionId: string): void {
+  try {
+    const hash = createHash('md5').update(sessionId).digest('hex').slice(0, 16);
+    const markerPath = join(tmpdir(), `codegraph-consulted-${hash}`);
+    writeFileSync(markerPath, new Date().toISOString(), 'utf8');
+  } catch {
+    // Silently fail - don't break MCP on marker write failure
+  }
+}
 
 /**
  * MCP Tool definition
@@ -39,10 +57,20 @@ export interface ToolResult {
 }
 
 /**
+ * Common projectPath property for cross-project queries
+ */
+const projectPathProperty: PropertySchema = {
+  type: 'string',
+  description: 'Path to a different project with .codegraph/ initialized. If omitted, uses current project. Use this to query other codebases.',
+};
+
+/**
  * All CodeGraph MCP tools
  *
  * Designed for minimal context usage - use codegraph_context as the primary tool,
  * and only use other tools for targeted follow-up queries.
+ *
+ * All tools support cross-project queries via the optional `projectPath` parameter.
  */
 export const tools: ToolDefinition[] = [
   {
@@ -65,6 +93,7 @@ export const tools: ToolDefinition[] = [
           description: 'Maximum results (default: 10)',
           default: 10,
         },
+        projectPath: projectPathProperty,
       },
       required: ['query'],
     },
@@ -89,6 +118,7 @@ export const tools: ToolDefinition[] = [
           description: 'Include code snippets for key symbols (default: true)',
           default: true,
         },
+        projectPath: projectPathProperty,
       },
       required: ['task'],
     },
@@ -108,6 +138,7 @@ export const tools: ToolDefinition[] = [
           description: 'Maximum number of callers to return (default: 20)',
           default: 20,
         },
+        projectPath: projectPathProperty,
       },
       required: ['symbol'],
     },
@@ -127,6 +158,7 @@ export const tools: ToolDefinition[] = [
           description: 'Maximum number of callees to return (default: 20)',
           default: 20,
         },
+        projectPath: projectPathProperty,
       },
       required: ['symbol'],
     },
@@ -146,6 +178,7 @@ export const tools: ToolDefinition[] = [
           description: 'How many levels of dependencies to traverse (default: 2)',
           default: 2,
         },
+        projectPath: projectPathProperty,
       },
       required: ['symbol'],
     },
@@ -165,6 +198,7 @@ export const tools: ToolDefinition[] = [
           description: 'Include full source code (default: false to minimize context)',
           default: false,
         },
+        projectPath: projectPathProperty,
       },
       required: ['symbol'],
     },
@@ -174,16 +208,110 @@ export const tools: ToolDefinition[] = [
     description: 'Get the status of the CodeGraph index, including statistics about indexed files, nodes, and edges.',
     inputSchema: {
       type: 'object',
-      properties: {},
+      properties: {
+        projectPath: projectPathProperty,
+      },
+    },
+  },
+  {
+    name: 'codegraph_files',
+    description: 'REQUIRED for file/folder exploration. Get the project file structure from the CodeGraph index. Returns a tree view of all indexed files with metadata (language, symbol count). Much faster than Glob/filesystem scanning. Use this FIRST when exploring project structure, finding files, or understanding codebase organization.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Filter to files under this directory path (e.g., "src/components"). Returns all files if not specified.',
+        },
+        pattern: {
+          type: 'string',
+          description: 'Filter files matching this glob pattern (e.g., "*.tsx", "**/*.test.ts")',
+        },
+        format: {
+          type: 'string',
+          description: 'Output format: "tree" (hierarchical, default), "flat" (simple list), "grouped" (by language)',
+          enum: ['tree', 'flat', 'grouped'],
+          default: 'tree',
+        },
+        includeMetadata: {
+          type: 'boolean',
+          description: 'Include file metadata like language and symbol count (default: true)',
+          default: true,
+        },
+        maxDepth: {
+          type: 'number',
+          description: 'Maximum directory depth to show (default: unlimited)',
+        },
+        projectPath: projectPathProperty,
+      },
     },
   },
 ];
 
 /**
  * Tool handler that executes tools against a CodeGraph instance
+ *
+ * Supports cross-project queries via the projectPath parameter.
+ * Other projects are opened on-demand and cached for performance.
  */
 export class ToolHandler {
+  // Cache of opened CodeGraph instances for cross-project queries
+  private projectCache: Map<string, CodeGraph> = new Map();
+
   constructor(private cg: CodeGraph) {}
+
+  /**
+   * Get CodeGraph instance for a project
+   *
+   * If projectPath is provided, opens that project's CodeGraph (cached).
+   * Otherwise returns the default CodeGraph instance.
+   *
+   * Walks up parent directories to find the nearest .codegraph/ folder,
+   * similar to how git finds .git/ directories.
+   */
+  private getCodeGraph(projectPath?: string): CodeGraph {
+    if (!projectPath) {
+      return this.cg;
+    }
+
+    // Check cache first (using original path as key)
+    if (this.projectCache.has(projectPath)) {
+      return this.projectCache.get(projectPath)!;
+    }
+
+    // Walk up parent directories to find nearest .codegraph/
+    const resolvedRoot = findNearestCodeGraphRoot(projectPath);
+
+    if (!resolvedRoot) {
+      throw new Error(`CodeGraph not initialized in ${projectPath}. Run 'codegraph init' in that project first.`);
+    }
+
+    // Check if we already have this resolved root cached (different path, same project)
+    if (this.projectCache.has(resolvedRoot)) {
+      const cg = this.projectCache.get(resolvedRoot)!;
+      // Cache under original path too for faster future lookups
+      this.projectCache.set(projectPath, cg);
+      return cg;
+    }
+
+    // Open and cache under both paths
+    const cg = CodeGraph.openSync(resolvedRoot);
+    this.projectCache.set(resolvedRoot, cg);
+    if (projectPath !== resolvedRoot) {
+      this.projectCache.set(projectPath, cg);
+    }
+    return cg;
+  }
+
+  /**
+   * Close all cached project connections
+   */
+  closeAll(): void {
+    for (const cg of this.projectCache.values()) {
+      cg.close();
+    }
+    this.projectCache.clear();
+  }
 
   /**
    * Execute a tool by name
@@ -204,11 +332,14 @@ export class ToolHandler {
         case 'codegraph_node':
           return await this.handleNode(args);
         case 'codegraph_status':
-          return await this.handleStatus();
+          return await this.handleStatus(args);
+        case 'codegraph_files':
+          return await this.handleFiles(args);
         default:
           return this.errorResult(`Unknown tool: ${toolName}`);
       }
     } catch (err) {
+      try { const { captureException } = require('../sentry'); captureException(err, { tool: toolName }); } catch {}
       return this.errorResult(`Tool execution failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
@@ -217,11 +348,12 @@ export class ToolHandler {
    * Handle codegraph_search
    */
   private async handleSearch(args: Record<string, unknown>): Promise<ToolResult> {
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
     const query = args.query as string;
     const kind = args.kind as string | undefined;
     const limit = (args.limit as number) || 10;
 
-    const results = this.cg.searchNodes(query, {
+    const results = cg.searchNodes(query, {
       limit,
       kinds: kind ? [kind as NodeKind] : undefined,
     });
@@ -238,11 +370,18 @@ export class ToolHandler {
    * Handle codegraph_context
    */
   private async handleContext(args: Record<string, unknown>): Promise<ToolResult> {
+    // Mark session as consulted (enables Grep/Glob/Bash)
+    const sessionId = process.env.CLAUDE_SESSION_ID;
+    if (sessionId) {
+      markSessionConsulted(sessionId);
+    }
+
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
     const task = args.task as string;
     const maxNodes = (args.maxNodes as number) || 20;
     const includeCode = args.includeCode !== false;
 
-    const context = await this.cg.buildContext(task, {
+    const context = await cg.buildContext(task, {
       maxNodes,
       includeCode,
       format: 'markdown',
@@ -295,17 +434,18 @@ export class ToolHandler {
    * Handle codegraph_callers
    */
   private async handleCallers(args: Record<string, unknown>): Promise<ToolResult> {
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
     const symbol = args.symbol as string;
     const limit = (args.limit as number) || 20;
 
     // First find the node by name
-    const results = this.cg.searchNodes(symbol, { limit: 1 });
+    const results = cg.searchNodes(symbol, { limit: 1 });
     if (results.length === 0 || !results[0]) {
       return this.textResult(`Symbol "${symbol}" not found in the codebase`);
     }
 
     const node = results[0].node;
-    const callers = this.cg.getCallers(node.id);
+    const callers = cg.getCallers(node.id);
 
     if (callers.length === 0) {
       return this.textResult(`No callers found for "${symbol}"`);
@@ -321,17 +461,18 @@ export class ToolHandler {
    * Handle codegraph_callees
    */
   private async handleCallees(args: Record<string, unknown>): Promise<ToolResult> {
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
     const symbol = args.symbol as string;
     const limit = (args.limit as number) || 20;
 
     // First find the node by name
-    const results = this.cg.searchNodes(symbol, { limit: 1 });
+    const results = cg.searchNodes(symbol, { limit: 1 });
     if (results.length === 0 || !results[0]) {
       return this.textResult(`Symbol "${symbol}" not found in the codebase`);
     }
 
     const node = results[0].node;
-    const callees = this.cg.getCallees(node.id);
+    const callees = cg.getCallees(node.id);
 
     if (callees.length === 0) {
       return this.textResult(`No callees found for "${symbol}"`);
@@ -347,17 +488,18 @@ export class ToolHandler {
    * Handle codegraph_impact
    */
   private async handleImpact(args: Record<string, unknown>): Promise<ToolResult> {
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
     const symbol = args.symbol as string;
     const depth = (args.depth as number) || 2;
 
     // First find the node by name
-    const results = this.cg.searchNodes(symbol, { limit: 1 });
+    const results = cg.searchNodes(symbol, { limit: 1 });
     if (results.length === 0 || !results[0]) {
       return this.textResult(`Symbol "${symbol}" not found in the codebase`);
     }
 
     const node = results[0].node;
-    const impact = this.cg.getImpactRadius(node.id, depth);
+    const impact = cg.getImpactRadius(node.id, depth);
 
     const formatted = this.formatImpact(symbol, impact);
     return this.textResult(formatted);
@@ -367,12 +509,13 @@ export class ToolHandler {
    * Handle codegraph_node
    */
   private async handleNode(args: Record<string, unknown>): Promise<ToolResult> {
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
     const symbol = args.symbol as string;
     // Default to false to minimize context usage
     const includeCode = args.includeCode === true;
 
     // Find the node by name
-    const results = this.cg.searchNodes(symbol, { limit: 1 });
+    const results = cg.searchNodes(symbol, { limit: 1 });
     if (results.length === 0 || !results[0]) {
       return this.textResult(`Symbol "${symbol}" not found in the codebase`);
     }
@@ -381,7 +524,7 @@ export class ToolHandler {
     let code: string | null = null;
 
     if (includeCode) {
-      code = await this.cg.getCode(node.id);
+      code = await cg.getCode(node.id);
     }
 
     const formatted = this.formatNodeDetails(node, code);
@@ -391,8 +534,9 @@ export class ToolHandler {
   /**
    * Handle codegraph_status
    */
-  private async handleStatus(): Promise<ToolResult> {
-    const stats = this.cg.getStats();
+  private async handleStatus(args: Record<string, unknown>): Promise<ToolResult> {
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    const stats = cg.getStats();
 
     const lines: string[] = [
       '## CodeGraph Status',
@@ -419,6 +563,194 @@ export class ToolHandler {
     }
 
     return this.textResult(lines.join('\n'));
+  }
+
+  /**
+   * Handle codegraph_files - get project file structure from the index
+   */
+  private async handleFiles(args: Record<string, unknown>): Promise<ToolResult> {
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    const pathFilter = args.path as string | undefined;
+    const pattern = args.pattern as string | undefined;
+    const format = (args.format as 'tree' | 'flat' | 'grouped') || 'tree';
+    const includeMetadata = args.includeMetadata !== false;
+    const maxDepth = args.maxDepth as number | undefined;
+
+    // Get all files from the index
+    const allFiles = cg.getFiles();
+
+    if (allFiles.length === 0) {
+      return this.textResult('No files indexed. Run `codegraph index` first.');
+    }
+
+    // Filter by path prefix
+    let files = pathFilter
+      ? allFiles.filter(f => f.path.startsWith(pathFilter) || f.path.startsWith('./' + pathFilter))
+      : allFiles;
+
+    // Filter by glob pattern
+    if (pattern) {
+      const regex = this.globToRegex(pattern);
+      files = files.filter(f => regex.test(f.path));
+    }
+
+    if (files.length === 0) {
+      return this.textResult(`No files found matching the criteria.`);
+    }
+
+    // Format output
+    let output: string;
+    switch (format) {
+      case 'flat':
+        output = this.formatFilesFlat(files, includeMetadata);
+        break;
+      case 'grouped':
+        output = this.formatFilesGrouped(files, includeMetadata);
+        break;
+      case 'tree':
+      default:
+        output = this.formatFilesTree(files, includeMetadata, maxDepth);
+        break;
+    }
+
+    return this.textResult(output);
+  }
+
+  /**
+   * Convert glob pattern to regex
+   */
+  private globToRegex(pattern: string): RegExp {
+    const escaped = pattern
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')  // Escape special regex chars except * and ?
+      .replace(/\*\*/g, '{{GLOBSTAR}}')       // Temp placeholder for **
+      .replace(/\*/g, '[^/]*')                // * matches anything except /
+      .replace(/\?/g, '[^/]')                 // ? matches single char except /
+      .replace(/\{\{GLOBSTAR\}\}/g, '.*');    // ** matches anything including /
+    return new RegExp(escaped);
+  }
+
+  /**
+   * Format files as a flat list
+   */
+  private formatFilesFlat(files: { path: string; language: string; nodeCount: number }[], includeMetadata: boolean): string {
+    const lines: string[] = [`## Files (${files.length})`, ''];
+
+    for (const file of files.sort((a, b) => a.path.localeCompare(b.path))) {
+      if (includeMetadata) {
+        lines.push(`- ${file.path} (${file.language}, ${file.nodeCount} symbols)`);
+      } else {
+        lines.push(`- ${file.path}`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Format files grouped by language
+   */
+  private formatFilesGrouped(files: { path: string; language: string; nodeCount: number }[], includeMetadata: boolean): string {
+    const byLang = new Map<string, typeof files>();
+
+    for (const file of files) {
+      const existing = byLang.get(file.language) || [];
+      existing.push(file);
+      byLang.set(file.language, existing);
+    }
+
+    const lines: string[] = [`## Files by Language (${files.length} total)`, ''];
+
+    // Sort languages by file count (descending)
+    const sortedLangs = [...byLang.entries()].sort((a, b) => b[1].length - a[1].length);
+
+    for (const [lang, langFiles] of sortedLangs) {
+      lines.push(`### ${lang} (${langFiles.length})`);
+      for (const file of langFiles.sort((a, b) => a.path.localeCompare(b.path))) {
+        if (includeMetadata) {
+          lines.push(`- ${file.path} (${file.nodeCount} symbols)`);
+        } else {
+          lines.push(`- ${file.path}`);
+        }
+      }
+      lines.push('');
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Format files as a tree structure
+   */
+  private formatFilesTree(
+    files: { path: string; language: string; nodeCount: number }[],
+    includeMetadata: boolean,
+    maxDepth?: number
+  ): string {
+    // Build tree structure
+    interface TreeNode {
+      name: string;
+      children: Map<string, TreeNode>;
+      file?: { language: string; nodeCount: number };
+    }
+
+    const root: TreeNode = { name: '', children: new Map() };
+
+    for (const file of files) {
+      const parts = file.path.split('/');
+      let current = root;
+
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (!part) continue;
+
+        if (!current.children.has(part)) {
+          current.children.set(part, { name: part, children: new Map() });
+        }
+        current = current.children.get(part)!;
+
+        // If this is the last part, it's a file
+        if (i === parts.length - 1) {
+          current.file = { language: file.language, nodeCount: file.nodeCount };
+        }
+      }
+    }
+
+    // Render tree
+    const lines: string[] = [`## Project Structure (${files.length} files)`, ''];
+
+    const renderNode = (node: TreeNode, prefix: string, isLast: boolean, depth: number): void => {
+      if (maxDepth !== undefined && depth > maxDepth) return;
+
+      const connector = isLast ? '└── ' : '├── ';
+      const childPrefix = isLast ? '    ' : '│   ';
+
+      if (node.name) {
+        let line = prefix + connector + node.name;
+        if (node.file && includeMetadata) {
+          line += ` (${node.file.language}, ${node.file.nodeCount} symbols)`;
+        }
+        lines.push(line);
+      }
+
+      const children = [...node.children.values()];
+      // Sort: directories first, then files, both alphabetically
+      children.sort((a, b) => {
+        const aIsDir = a.children.size > 0 && !a.file;
+        const bIsDir = b.children.size > 0 && !b.file;
+        if (aIsDir !== bIsDir) return aIsDir ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i]!;
+        const nextPrefix = node.name ? prefix + childPrefix : prefix;
+        renderNode(child, nextPrefix, i === children.length - 1, depth + 1);
+      }
+    };
+
+    renderNode(root, '', true, 0);
+
+    return lines.join('\n');
   }
 
   // =========================================================================

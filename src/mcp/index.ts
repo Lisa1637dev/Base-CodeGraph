@@ -15,9 +15,12 @@
  * ```
  */
 
-import CodeGraph from '../index';
+import CodeGraph, { findNearestCodeGraphRoot } from '../index';
 import { StdioTransport, JsonRpcRequest, JsonRpcNotification, ErrorCodes } from './transport';
 import { tools, ToolHandler } from './tools';
+import { initSentry, captureException } from '../sentry';
+
+initSentry({ processName: 'codegraph-mcp' });
 
 /**
  * MCP Server Info
@@ -68,20 +71,28 @@ export class MCPServer {
 
   /**
    * Initialize CodeGraph for the project
+   *
+   * Walks up parent directories to find the nearest .codegraph/ folder,
+   * similar to how git finds .git/ directories.
    */
   private async initializeCodeGraph(projectPath: string): Promise<void> {
-    this.projectPath = projectPath;
+    // Walk up parent directories to find nearest .codegraph/
+    const resolvedRoot = findNearestCodeGraphRoot(projectPath);
 
-    if (!CodeGraph.isInitialized(projectPath)) {
+    if (!resolvedRoot) {
+      this.projectPath = projectPath;
       this.initError = `CodeGraph not initialized in ${projectPath}. Run 'codegraph init' first.`;
       return;
     }
 
+    this.projectPath = resolvedRoot;
+
     try {
-      this.cg = await CodeGraph.open(projectPath);
+      this.cg = await CodeGraph.open(resolvedRoot);
       this.toolHandler = new ToolHandler(this.cg);
       this.initError = null;
     } catch (err) {
+      captureException(err);
       this.initError = `Failed to open CodeGraph: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
@@ -90,6 +101,11 @@ export class MCPServer {
    * Stop the server
    */
   stop(): void {
+    // Close all cached cross-project connections first
+    if (this.toolHandler) {
+      this.toolHandler.closeAll();
+    }
+    // Close the main CodeGraph instance
     if (this.cg) {
       this.cg.close();
       this.cg = null;

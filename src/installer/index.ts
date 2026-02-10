@@ -151,14 +151,6 @@ async function initializeLocalProject(): Promise<void> {
     success(`Indexed ${formatNumber(result.filesIndexed)} files with ${result.errors.length} warnings`);
   }
 
-  // Install git hooks if this is a git repository
-  if (cg.isGitRepository()) {
-    const hookResult = cg.installGitHooks();
-    if (hookResult.success) {
-      success('Installed git post-commit hook');
-    }
-  }
-
   cg.close();
 }
 

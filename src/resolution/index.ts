@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Node, UnresolvedReference, Edge } from '../types';
 import { QueryBuilder } from '../db/queries';
+import { captureException } from '../sentry';
 import {
   UnresolvedRef,
   ResolvedRef,
@@ -91,6 +92,7 @@ export class ReferenceResolver {
         try {
           return fs.existsSync(fullPath);
         } catch (error) {
+          captureException(error, { operation: 'resolution-file-exists', filePath });
           logDebug('Error checking file existence', { filePath, error: String(error) });
           return false;
         }
@@ -107,6 +109,7 @@ export class ReferenceResolver {
           this.fileCache.set(filePath, content);
           return content;
         } catch (error) {
+          captureException(error, { operation: 'resolution-read-file', filePath });
           logDebug('Failed to read file for resolution', { filePath, error: String(error) });
           this.fileCache.set(filePath, null);
           return null;
@@ -124,7 +127,10 @@ export class ReferenceResolver {
   /**
    * Resolve all unresolved references
    */
-  resolveAll(unresolvedRefs: UnresolvedReference[]): ResolutionResult {
+  resolveAll(
+    unresolvedRefs: UnresolvedReference[],
+    onProgress?: (current: number, total: number) => void
+  ): ResolutionResult {
     const resolved: ResolvedRef[] = [];
     const unresolved: UnresolvedRef[] = [];
     const byMethod: Record<string, number> = {};
@@ -140,7 +146,11 @@ export class ReferenceResolver {
       language: this.getLanguageFromNodeId(ref.fromNodeId),
     }));
 
-    for (const ref of refs) {
+    const total = refs.length;
+    let lastReportedPercent = -1;
+
+    for (let i = 0; i < refs.length; i++) {
+      const ref = refs[i]!; // Array index is guaranteed to be in bounds
       const result = this.resolveOne(ref);
 
       if (result) {
@@ -149,6 +159,20 @@ export class ReferenceResolver {
       } else {
         unresolved.push(ref);
       }
+
+      // Report progress every 1% to avoid too many updates
+      if (onProgress) {
+        const currentPercent = Math.floor((i / total) * 100);
+        if (currentPercent > lastReportedPercent) {
+          lastReportedPercent = currentPercent;
+          onProgress(i + 1, total);
+        }
+      }
+    }
+
+    // Final progress report
+    if (onProgress && total > 0) {
+      onProgress(total, total);
     }
 
     return {
@@ -215,8 +239,11 @@ export class ReferenceResolver {
   /**
    * Resolve and persist edges to database
    */
-  resolveAndPersist(unresolvedRefs: UnresolvedReference[]): ResolutionResult {
-    const result = this.resolveAll(unresolvedRefs);
+  resolveAndPersist(
+    unresolvedRefs: UnresolvedReference[],
+    onProgress?: (current: number, total: number) => void
+  ): ResolutionResult {
+    const result = this.resolveAll(unresolvedRefs, onProgress);
 
     // Create edges from resolved references
     const edges = this.createEdges(result.resolved);

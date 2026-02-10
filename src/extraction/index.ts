@@ -18,6 +18,7 @@ import { QueryBuilder } from '../db/queries';
 import { extractFromSource } from './tree-sitter';
 import { detectLanguage, isLanguageSupported } from './grammars';
 import { logDebug } from '../errors';
+import { captureException } from '../sentry';
 
 /**
  * Progress callback for indexing operations
@@ -112,6 +113,11 @@ export function shouldIncludeFile(
 }
 
 /**
+ * Marker file name that indicates a directory (and all children) should be skipped
+ */
+const CODEGRAPH_IGNORE_MARKER = '.codegraphignore';
+
+/**
  * Recursively scan directory for source files
  */
 export function scanDirectory(
@@ -123,10 +129,18 @@ export function scanDirectory(
   let count = 0;
 
   function walk(dir: string): void {
+    // Check for .codegraphignore marker file - skip entire directory tree if present
+    const ignoreMarker = path.join(dir, CODEGRAPH_IGNORE_MARKER);
+    if (fs.existsSync(ignoreMarker)) {
+      logDebug('Skipping directory due to .codegraphignore marker', { dir });
+      return;
+    }
+
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch (error) {
+      captureException(error, { operation: 'walk-directory', dir });
       logDebug('Skipping unreadable directory', { dir, error: String(error) });
       return;
     }
@@ -330,6 +344,7 @@ export class ExtractionOrchestrator {
       stats = fs.statSync(fullPath);
       content = fs.readFileSync(fullPath, 'utf-8');
     } catch (error) {
+      captureException(error, { operation: 'extract-file', filePath: fullPath });
       return {
         nodes: [],
         edges: [],
@@ -476,6 +491,7 @@ export class ExtractionOrchestrator {
       try {
         content = fs.readFileSync(fullPath, 'utf-8');
       } catch (error) {
+        captureException(error, { operation: 'sync-read-file', filePath });
         logDebug('Skipping unreadable file during sync', { filePath, error: String(error) });
         continue;
       }
@@ -544,6 +560,7 @@ export class ExtractionOrchestrator {
       try {
         content = fs.readFileSync(fullPath, 'utf-8');
       } catch (error) {
+        captureException(error, { operation: 'detect-changes-read-file', filePath });
         logDebug('Skipping unreadable file while detecting changes', { filePath, error: String(error) });
         continue;
       }

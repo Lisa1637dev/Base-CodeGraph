@@ -71,6 +71,7 @@ export type Language =
   | 'ruby'
   | 'swift'
   | 'kotlin'
+  | 'dart'
   | 'liquid'
   | 'unknown';
 
@@ -497,6 +498,13 @@ export const DEFAULT_CONFIG: CodeGraphConfig = {
     '**/*.php',
     // Ruby
     '**/*.rb',
+    // Swift
+    '**/*.swift',
+    // Kotlin
+    '**/*.kt',
+    '**/*.kts',
+    // Dart
+    '**/*.dart',
     // Liquid (Shopify themes)
     '**/*.liquid',
   ],
@@ -569,6 +577,9 @@ export const DEFAULT_CONFIG: CodeGraphConfig = {
     '**/.m2/**',
     '**/generated-sources/**',
     '**/.kotlin/**',
+
+    // Dart/Flutter
+    '**/.dart_tool/**',
 
     // C#/.NET
     '**/.vs/**',

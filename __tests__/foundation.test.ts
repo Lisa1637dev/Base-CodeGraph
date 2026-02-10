@@ -48,7 +48,7 @@ describe('CodeGraph Foundation', () => {
       cg.close();
     });
 
-    it('should create .gitignore in .codegraph directory', () => {
+    it('should create .gitignore in .CodeGraph directory', () => {
       const cg = CodeGraph.initSync(tempDir);
 
       const gitignorePath = path.join(getCodeGraphDir(tempDir), '.gitignore');
@@ -225,7 +225,7 @@ describe('CodeGraph Foundation', () => {
   });
 
   describe('Uninitialize', () => {
-    it('should remove .codegraph directory', () => {
+    it('should remove .CodeGraph directory', () => {
       const cg = CodeGraph.initSync(tempDir);
 
       cg.uninitialize();
@@ -236,7 +236,7 @@ describe('CodeGraph Foundation', () => {
   });
 
   describe('Close/Destroy', () => {
-    it('should close database but keep .codegraph directory', () => {
+    it('should close database but keep .CodeGraph directory', () => {
       const cg = CodeGraph.initSync(tempDir);
 
       cg.destroy(); // destroy is alias for close

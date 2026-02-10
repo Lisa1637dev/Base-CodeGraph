@@ -10,6 +10,8 @@ import * as path from 'path';
 import {
   Node,
   Edge,
+  NodeKind,
+  EdgeKind,
   Subgraph,
   CodeBlock,
   TaskContext,
@@ -23,6 +25,74 @@ import { GraphTraverser } from '../graph';
 import { VectorManager } from '../vectors';
 import { formatContextAsMarkdown, formatContextAsJson } from './formatter';
 import { logDebug, logWarn } from '../errors';
+
+/**
+ * Extract likely symbol names from a natural language query
+ *
+ * Identifies potential code symbols using patterns:
+ * - CamelCase: UserService, signInWithGoogle
+ * - snake_case: user_service, sign_in
+ * - SCREAMING_SNAKE: MAX_RETRIES
+ * - dot.notation: app.isPackaged (extracts both sides)
+ * - Single words that look like identifiers (no spaces, not common English words)
+ *
+ * @param query - Natural language query
+ * @returns Array of potential symbol names
+ */
+function extractSymbolsFromQuery(query: string): string[] {
+  const symbols = new Set<string>();
+
+  // Extract CamelCase identifiers (2+ chars, starts with letter)
+  const camelCasePattern = /\b([A-Z][a-z]+(?:[A-Z][a-z]*)*|[a-z]+(?:[A-Z][a-z]*)+)\b/g;
+  let match;
+  while ((match = camelCasePattern.exec(query)) !== null) {
+    if (match[1] && match[1].length >= 2) {
+      symbols.add(match[1]);
+    }
+  }
+
+  // Extract snake_case identifiers
+  const snakeCasePattern = /\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b/gi;
+  while ((match = snakeCasePattern.exec(query)) !== null) {
+    if (match[1] && match[1].length >= 3) {
+      symbols.add(match[1]);
+    }
+  }
+
+  // Extract SCREAMING_SNAKE_CASE
+  const screamingPattern = /\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/g;
+  while ((match = screamingPattern.exec(query)) !== null) {
+    if (match[1]) {
+      symbols.add(match[1]);
+    }
+  }
+
+  // Extract dot.notation and split into parts (e.g., "app.isPackaged" -> ["app", "isPackaged"])
+  const dotPattern = /\b([a-zA-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)+)\b/g;
+  while ((match = dotPattern.exec(query)) !== null) {
+    if (match[1]) {
+      // Add both the full path and individual parts
+      symbols.add(match[1]);
+      const parts = match[1].split('.');
+      for (const part of parts) {
+        if (part.length >= 2) {
+          symbols.add(part);
+        }
+      }
+    }
+  }
+
+  // Filter out common English words that might match patterns
+  const commonWords = new Set([
+    'the', 'and', 'for', 'with', 'from', 'this', 'that', 'have', 'been',
+    'will', 'would', 'could', 'should', 'does', 'done', 'make', 'made',
+    'use', 'used', 'using', 'work', 'works', 'find', 'found', 'show',
+    'call', 'called', 'calling', 'get', 'set', 'add', 'all', 'any',
+    'how', 'what', 'when', 'where', 'which', 'who', 'why'
+  ]);
+
+  return Array.from(symbols).filter(s => !commonWords.has(s.toLowerCase()));
+}
 
 /**
  * Default options for context building
@@ -44,6 +114,16 @@ const DEFAULT_BUILD_OPTIONS: Required<BuildContextOptions> = {
 };
 
 /**
+ * Node kinds that provide high information value in context results.
+ * Imports/exports are excluded because they have near-zero information density -
+ * they tell you something exists, not how it works.
+ */
+const HIGH_VALUE_NODE_KINDS: NodeKind[] = [
+  'function', 'method', 'class', 'interface', 'type_alias', 'struct', 'trait',
+  'component', 'route', 'variable', 'constant', 'enum', 'module', 'namespace',
+];
+
+/**
  * Default options for finding relevant context
  */
 const DEFAULT_FIND_OPTIONS: Required<FindRelevantContextOptions> = {
@@ -52,7 +132,7 @@ const DEFAULT_FIND_OPTIONS: Required<FindRelevantContextOptions> = {
   maxNodes: 20,          // Reduced from 50
   minScore: 0.3,
   edgeKinds: [],
-  nodeKinds: [],
+  nodeKinds: HIGH_VALUE_NODE_KINDS, // Filter out imports/exports by default
 };
 
 /**
@@ -156,10 +236,12 @@ export class ContextBuilder {
   /**
    * Find relevant subgraph for a query
    *
-   * Combines semantic search with graph traversal:
-   * 1. Use semantic search to find relevant entry points
-   * 2. Traverse graph from entry points
-   * 3. Merge results into a unified subgraph
+   * Uses hybrid search combining exact symbol lookup with semantic search:
+   * 1. Extract potential symbol names from query
+   * 2. Look up exact matches for those symbols (high confidence)
+   * 3. Use semantic search for concept matching
+   * 4. Merge results, prioritizing exact matches
+   * 5. Traverse graph from entry points
    *
    * @param query - Natural language query
    * @param options - Search and traversal options
@@ -181,35 +263,84 @@ export class ContextBuilder {
       return { nodes, edges, roots };
     }
 
-    // Try semantic search if vector manager is available
-    let searchResults: SearchResult[] = [];
+    // === HYBRID SEARCH ===
+
+    // Step 1: Extract potential symbol names from query
+    const symbolsFromQuery = extractSymbolsFromQuery(query);
+    logDebug('Extracted symbols from query', { query, symbols: symbolsFromQuery });
+
+    // Step 2: Look up exact matches for extracted symbols
+    let exactMatches: SearchResult[] = [];
+    if (symbolsFromQuery.length > 0) {
+      try {
+        exactMatches = this.queries.findNodesByExactName(symbolsFromQuery, {
+          limit: Math.ceil(opts.searchLimit * 2), // Get more since we'll merge
+          kinds: opts.nodeKinds && opts.nodeKinds.length > 0 ? opts.nodeKinds : undefined,
+        });
+        logDebug('Exact symbol matches', { count: exactMatches.length });
+      } catch (error) {
+        logDebug('Exact symbol lookup failed', { error: String(error) });
+      }
+    }
+
+    // Step 3: Try semantic search if vector manager is available
+    let semanticResults: SearchResult[] = [];
     if (this.vectorManager && this.vectorManager.isInitialized()) {
       try {
-        searchResults = await this.vectorManager.search(query, {
+        semanticResults = await this.vectorManager.search(query, {
           limit: opts.searchLimit,
           kinds: opts.nodeKinds && opts.nodeKinds.length > 0 ? opts.nodeKinds : undefined,
         });
+        logDebug('Semantic search results', { count: semanticResults.length });
       } catch (error) {
         logDebug('Semantic search failed, falling back to text search', { query, error: String(error) });
       }
     }
 
-    // Fall back to text search if no semantic results
-    if (searchResults.length === 0) {
+    // Step 4: Fall back to text search if no semantic results
+    if (semanticResults.length === 0 && exactMatches.length === 0) {
       try {
         const textResults = this.queries.searchNodes(query, {
           limit: opts.searchLimit,
           kinds: opts.nodeKinds && opts.nodeKinds.length > 0 ? opts.nodeKinds : undefined,
         });
-        searchResults = textResults;
+        semanticResults = textResults;
       } catch (error) {
         logWarn('Text search failed', { query, error: String(error) });
         // Return empty results
       }
     }
 
+    // Step 5: Merge results, prioritizing exact matches
+    const seenIds = new Set<string>();
+    let searchResults: SearchResult[] = [];
+
+    // Add exact matches first (highest priority)
+    for (const result of exactMatches) {
+      if (!seenIds.has(result.node.id)) {
+        seenIds.add(result.node.id);
+        searchResults.push(result);
+      }
+    }
+
+    // Add semantic/text results
+    for (const result of semanticResults) {
+      if (!seenIds.has(result.node.id)) {
+        seenIds.add(result.node.id);
+        searchResults.push(result);
+      }
+    }
+
+    // Limit total results
+    searchResults = searchResults.slice(0, opts.searchLimit * 2);
+
     // Filter by minimum score
-    const filteredResults = searchResults.filter((r) => r.score >= opts.minScore);
+    let filteredResults = searchResults.filter((r) => r.score >= opts.minScore);
+
+    // Resolve imports/exports to their actual definitions
+    // If someone searches "terminal" and finds `import { TerminalPanel }`,
+    // they want the TerminalPanel class, not the import statement
+    filteredResults = this.resolveImportsToDefinitions(filteredResults);
 
     // Add entry points to subgraph
     for (const result of filteredResults) {
@@ -430,6 +561,66 @@ export class ContextBuilder {
     return `Found ${nodeCount} relevant code symbols across ${files.length} files. ` +
       `Key entry points: ${entryPointNames}${remaining}. ` +
       `${edgeCount} relationships identified.`;
+  }
+
+  /**
+   * Resolve import/export nodes to their actual definitions
+   *
+   * When search returns `import { TerminalPanel }`, users want the TerminalPanel
+   * class definition, not the import statement. This follows the `imports` edge
+   * to find and return the actual definition instead.
+   *
+   * @param results - Search results that may include import/export nodes
+   * @returns Results with imports resolved to definitions where possible
+   */
+  private resolveImportsToDefinitions(results: SearchResult[]): SearchResult[] {
+    const resolved: SearchResult[] = [];
+    const seenIds = new Set<string>();
+
+    for (const result of results) {
+      const { node, score } = result;
+
+      // If it's not an import/export, keep it as-is
+      if (node.kind !== 'import' && node.kind !== 'export') {
+        if (!seenIds.has(node.id)) {
+          seenIds.add(node.id);
+          resolved.push(result);
+        }
+        continue;
+      }
+
+      // For imports/exports, try to find what they reference
+      // Imports have outgoing 'imports' edges to the definition
+      // Exports have outgoing 'exports' edges to the definition
+      const edgeKind = node.kind === 'import' ? 'imports' : 'exports';
+      const outgoingEdges = this.queries.getOutgoingEdges(node.id, [edgeKind as EdgeKind]);
+
+      let foundDefinition = false;
+      for (const edge of outgoingEdges) {
+        const targetNode = this.queries.getNodeById(edge.target);
+        if (targetNode && !seenIds.has(targetNode.id)) {
+          // Found the definition - use it instead of the import
+          seenIds.add(targetNode.id);
+          resolved.push({
+            node: targetNode,
+            score: score, // Preserve the original score
+          });
+          foundDefinition = true;
+          logDebug('Resolved import to definition', {
+            import: node.name,
+            definition: targetNode.name,
+            kind: targetNode.kind,
+          });
+        }
+      }
+
+      // If we couldn't resolve the import, skip it (it's low-value on its own)
+      if (!foundDefinition) {
+        logDebug('Skipping unresolved import', { name: node.name, file: node.filePath });
+      }
+    }
+
+    return resolved;
   }
 }
 

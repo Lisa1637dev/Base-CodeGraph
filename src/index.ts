@@ -47,19 +47,22 @@ import {
 import { GraphTraverser, GraphQueryManager } from './graph';
 import { VectorManager, createVectorManager, EmbeddingProgress } from './vectors';
 import { ContextBuilder, createContextBuilder } from './context';
-import { GitHooksManager, createGitHooksManager, HookInstallResult, HookRemoveResult } from './sync';
 import { Mutex } from './utils';
 
 // Re-export types for consumers
 export * from './types';
 export { getDatabasePath } from './db';
 export { getConfigPath } from './config';
-export { getCodeGraphDir, isInitialized } from './directory';
+export {
+  getCodeGraphDir,
+  isInitialized,
+  findNearestCodeGraphRoot,
+  CODEGRAPH_DIR,
+} from './directory';
 export { IndexProgress, IndexResult, SyncResult } from './extraction';
 export { detectLanguage, isLanguageSupported, getSupportedLanguages } from './extraction';
 export { ResolutionResult } from './resolution';
 export { EmbeddingProgress } from './vectors';
-export { HookInstallResult, HookRemoveResult } from './sync';
 export {
   CodeGraphError,
   FileError,
@@ -129,7 +132,6 @@ export class CodeGraph {
   private traverser: GraphTraverser;
   private vectorManager: VectorManager | null = null;
   private contextBuilder: ContextBuilder;
-  private gitHooksManager: GitHooksManager;
 
   // Mutex for preventing concurrent indexing operations
   private indexMutex = new Mutex();
@@ -149,12 +151,9 @@ export class CodeGraph {
     this.graphManager = new GraphQueryManager(queries);
     this.traverser = new GraphTraverser(queries);
     // Vector manager is created lazily when embeddings are enabled
+    // Uses global ~/.codegraph/models directory for shared embedding models
     if (config.enableEmbeddings) {
-      this.vectorManager = createVectorManager(db.getDb(), queries, {
-        embedder: {
-          cacheDir: path.join(projectRoot, '.codegraph', 'models'),
-        },
-      });
+      this.vectorManager = createVectorManager(db.getDb(), queries, {});
     }
     // Context builder (uses vector manager if available)
     this.contextBuilder = createContextBuilder(
@@ -163,8 +162,6 @@ export class CodeGraph {
       this.traverser,
       this.vectorManager
     );
-    // Git hooks manager
-    this.gitHooksManager = createGitHooksManager(projectRoot);
   }
 
   // ===========================================================================
@@ -174,7 +171,7 @@ export class CodeGraph {
   /**
    * Initialize a new CodeGraph project
    *
-   * Creates the .codegraph directory, database, and configuration.
+   * Creates the .CodeGraph directory, database, and configuration.
    *
    * @param projectRoot - Path to the project root directory
    * @param options - Initialization options
@@ -320,6 +317,11 @@ export class CodeGraph {
    * Close the CodeGraph instance and release resources
    */
   close(): void {
+    // Dispose vector manager first to release ONNX workers
+    if (this.vectorManager) {
+      this.vectorManager.dispose();
+      this.vectorManager = null;
+    }
     this.db.close();
   }
 
@@ -371,12 +373,22 @@ export class CodeGraph {
 
       // Resolve references to create call/import/extends edges
       if (result.success && result.filesIndexed > 0) {
+        // Get count of unresolved references for accurate progress
+        const unresolvedCount = this.queries.getUnresolvedReferences().length;
+
         options.onProgress?.({
           phase: 'resolving',
           current: 0,
-          total: 1,
+          total: unresolvedCount,
         });
-        this.resolveReferences();
+
+        this.resolveReferences((current, total) => {
+          options.onProgress?.({
+            phase: 'resolving',
+            current,
+            total,
+          });
+        });
       }
 
       return result;
@@ -405,7 +417,21 @@ export class CodeGraph {
 
       // Resolve references if files were updated
       if (result.filesAdded > 0 || result.filesModified > 0) {
-        this.resolveReferences();
+        const unresolvedCount = this.queries.getUnresolvedReferences().length;
+
+        options.onProgress?.({
+          phase: 'resolving',
+          current: 0,
+          total: unresolvedCount,
+        });
+
+        this.resolveReferences((current, total) => {
+          options.onProgress?.({
+            phase: 'resolving',
+            current,
+            total,
+          });
+        });
       }
 
       return result;
@@ -446,10 +472,10 @@ export class CodeGraph {
    * - Import-based resolution
    * - Name-based symbol matching
    */
-  resolveReferences(): ResolutionResult {
+  resolveReferences(onProgress?: (current: number, total: number) => void): ResolutionResult {
     // Get all unresolved references from the database
     const unresolvedRefs = this.queries.getUnresolvedReferences();
-    return this.resolver.resolveAndPersist(unresolvedRefs);
+    return this.resolver.resolveAndPersist(unresolvedRefs, onProgress);
   }
 
   /**
@@ -910,52 +936,6 @@ export class CodeGraph {
   }
 
   // ===========================================================================
-  // Git Integration
-  // ===========================================================================
-
-  /**
-   * Check if the project is a git repository
-   */
-  isGitRepository(): boolean {
-    return this.gitHooksManager.isGitRepository();
-  }
-
-  /**
-   * Check if the CodeGraph git hook is installed
-   */
-  isGitHookInstalled(): boolean {
-    return this.gitHooksManager.isHookInstalled();
-  }
-
-  /**
-   * Install git hooks for automatic incremental indexing
-   *
-   * Installs a post-commit hook that automatically runs `codegraph sync`
-   * after each commit to keep the graph up-to-date.
-   *
-   * If a post-commit hook already exists:
-   * - If it's a CodeGraph hook, it will be updated
-   * - If it's a user hook, it will be backed up before installing
-   *
-   * @returns Result indicating success/failure and any messages
-   */
-  installGitHooks(): HookInstallResult {
-    return this.gitHooksManager.installHook();
-  }
-
-  /**
-   * Remove CodeGraph git hooks
-   *
-   * Removes the CodeGraph post-commit hook. If a backup of a previous
-   * user hook exists, it will be restored.
-   *
-   * @returns Result indicating success/failure and any messages
-   */
-  removeGitHooks(): HookRemoveResult {
-    return this.gitHooksManager.removeHook();
-  }
-
-  // ===========================================================================
   // Database Management
   // ===========================================================================
 
@@ -983,12 +963,12 @@ export class CodeGraph {
 
   /**
    * Completely remove CodeGraph from the project.
-   * This closes the database and deletes the .codegraph directory.
+   * This closes the database and deletes the .CodeGraph directory.
    *
    * WARNING: This permanently deletes all CodeGraph data for the project.
    */
   uninitialize(): void {
-    this.db.close();
+    this.close();
     removeDirectory(this.projectRoot);
   }
 }

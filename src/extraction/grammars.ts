@@ -7,59 +7,67 @@
 import Parser from 'tree-sitter';
 import { Language } from '../types';
 
-// Grammar module imports
+// Grammar module imports — wrapped in tryRequire so a missing native binding
+// (e.g. tree-sitter-kotlin on Windows) degrades gracefully instead of crashing.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const TypeScript = require('tree-sitter-typescript').typescript;
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const TSX = require('tree-sitter-typescript').tsx;
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const JavaScript = require('tree-sitter-javascript');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Python = require('tree-sitter-python');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Go = require('tree-sitter-go');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Rust = require('tree-sitter-rust');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Java = require('tree-sitter-java');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const C = require('tree-sitter-c');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Cpp = require('tree-sitter-cpp');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const CSharp = require('tree-sitter-c-sharp');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const PHP = require('tree-sitter-php').php;
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Ruby = require('tree-sitter-ruby');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Swift = require('tree-sitter-swift');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Kotlin = require('tree-sitter-kotlin');
+function tryRequire(id: string, prop?: string): unknown | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require(id);
+    return prop ? mod[prop] : mod;
+  } catch {
+    console.warn(`[CodeGraph] Failed to load ${id} — ${prop ?? id} parsing will be unavailable on this platform.`);
+    return null;
+  }
+}
+
+const TypeScript = tryRequire('tree-sitter-typescript', 'typescript');
+const TSX = tryRequire('tree-sitter-typescript', 'tsx');
+const JavaScript = tryRequire('tree-sitter-javascript');
+const Python = tryRequire('tree-sitter-python');
+const Go = tryRequire('tree-sitter-go');
+const Rust = tryRequire('tree-sitter-rust');
+const Java = tryRequire('tree-sitter-java');
+const C = tryRequire('tree-sitter-c');
+const Cpp = tryRequire('tree-sitter-cpp');
+const CSharp = tryRequire('tree-sitter-c-sharp');
+const PHP = tryRequire('tree-sitter-php', 'php');
+const Ruby = tryRequire('tree-sitter-ruby');
+const Swift = tryRequire('tree-sitter-swift');
+const Kotlin = tryRequire('tree-sitter-kotlin');
+const Dart = tryRequire('@sengac/tree-sitter-dart');
 // Note: tree-sitter-liquid has ABI compatibility issues with tree-sitter 0.22+
 // Liquid extraction is handled separately via regex in tree-sitter.ts
 
 /**
- * Mapping of Language to tree-sitter grammar
+ * Mapping of Language to tree-sitter grammar.
+ * Parsers that failed to load are excluded.
  */
-const GRAMMAR_MAP: Record<string, unknown> = {
-  typescript: TypeScript,
-  tsx: TSX,
-  javascript: JavaScript,
-  jsx: JavaScript, // JSX uses the JavaScript grammar
-  python: Python,
-  go: Go,
-  rust: Rust,
-  java: Java,
-  c: C,
-  cpp: Cpp,
-  csharp: CSharp,
-  php: PHP,
-  ruby: Ruby,
-  swift: Swift,
-  kotlin: Kotlin,
+const GRAMMAR_MAP: Record<string, unknown> = {};
+
+const grammarEntries: [string, unknown][] = [
+  ['typescript', TypeScript],
+  ['tsx', TSX],
+  ['javascript', JavaScript],
+  ['jsx', JavaScript], // JSX uses the JavaScript grammar
+  ['python', Python],
+  ['go', Go],
+  ['rust', Rust],
+  ['java', Java],
+  ['c', C],
+  ['cpp', Cpp],
+  ['csharp', CSharp],
+  ['php', PHP],
+  ['ruby', Ruby],
+  ['swift', Swift],
+  ['kotlin', Kotlin],
+  ['dart', Dart],
   // liquid: uses custom regex-based extraction, not tree-sitter
-};
+];
+
+for (const [lang, grammar] of grammarEntries) {
+  if (grammar) GRAMMAR_MAP[lang] = grammar;
+}
 
 /**
  * File extension to Language mapping
@@ -90,6 +98,7 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.swift': 'swift',
   '.kt': 'kotlin',
   '.kts': 'kotlin',
+  '.dart': 'dart',
   '.liquid': 'liquid',
 };
 
@@ -175,6 +184,7 @@ export function getLanguageDisplayName(language: Language): string {
     ruby: 'Ruby',
     swift: 'Swift',
     kotlin: 'Kotlin',
+    dart: 'Dart',
     liquid: 'Liquid',
     unknown: 'Unknown',
   };
